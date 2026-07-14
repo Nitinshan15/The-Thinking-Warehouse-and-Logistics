@@ -5,17 +5,15 @@ A Smart Cities / IoT project using **AI planning (PDDL)** to automate a warehous
 ---
 
 
-
 ## Project Structure
 
 ```
 ├── mqtt_dashboard.py        # Live terminal MQTT monitor (optional)
 ├── pc/
 │   ├── configs/mqtt.json    # Broker config
-│   ├── pddl/domain.pddl    # PDDL domain & actions
+│   ├── pddl                 # PDDL domain,problem and output plan
 │   └── src/
 │       ├── warehouse.py     # GUI + planner + MQTT client
-│       └── mqtt_read_send.py
 └── pi/
     ├── configs/             # Broker & sensor thresholds
     └── src/
