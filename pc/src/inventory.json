@@ -1,0 +1,7 @@
+{
+    "INV-001": {
+        "name": "Standard Warehouse Units",
+        "qty": 496,
+        "min_threshold": 20
+    }
+}

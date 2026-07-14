@@ -1,0 +1,24 @@
+{
+  "light_sensor": {
+    "lighthigh_threshold": 600,
+    "lightlow_threshold": 200
+  },
+
+    "sound_sensor": {
+    "soundhigh_threshold":500
+  },
+
+    "ultrasonic_sensor": {
+    "objectdetected_threshold": 1
+  },
+
+    "temperature_sensor": {
+    "temphigh_threshold": 27
+  },
+
+    "humidity_sensor": {
+    "humidityhigh_threshold": 60
+  }
+
+
+}

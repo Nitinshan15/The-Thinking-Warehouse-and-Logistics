@@ -1,0 +1,9 @@
+{
+  "host": "192.168.0.199",
+  "port": 1883,
+  "base_topic": "sensors",
+  "building": "building1",
+  "floor": "floor0",
+  "zone": "zone1",
+  "publish_interval": 1
+}
