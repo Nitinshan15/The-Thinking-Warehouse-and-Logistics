@@ -704,31 +704,25 @@ class SmartWarehouseInterfaceGUI:
 
         if ultrasonic:
             zone.add(ultrasonic['zone'])
-            if(ultrasonic["raw"] <= ultrasonic["threshold"]):
-                
+            if ultrasonic["raw"] <= ultrasonic["threshold"]:
+                # Product detected — planner will see product-available and choose
+                # open-gate -> guide-left/right -> delivery-request-handled
                 pddl_init.append(f"(product-available {item_name} {ultrasonic['zone']})")
-                product_available = True
-            else:
-                product_available = False
-        else:
-            product_available = False
+            # If NOT detected — we simply omit product-available from :init.
+            # The planner will then autonomously pick notify-unavailable-left/right
+            # because open-gate requires (product-available ...) as a precondition.
 
         if delivery_request:
             zone.add(delivery_request['zone'])
             if delivery_request["command"] == "deliver_left":
-                
                 pddl_init.append(f"(delivery-requested-left {item_name} {delivery_request['zone']})")
-                if product_available:
-                    pddl_goals.append(f"(delivered-left {item_name})")
-                else:
-                    pddl_goals.append(f"(delivery-unavailable-notified {item_name} {delivery_request['zone']})")
             elif delivery_request["command"] == "deliver_right":
-                
                 pddl_init.append(f"(delivery-requested-right {item_name} {delivery_request['zone']})")
-                if product_available:
-                    pddl_goals.append(f"(delivered-right {item_name})")
-                else:
-                    pddl_goals.append(f"(delivery-unavailable-notified {item_name} {delivery_request['zone']})")
+
+            # Single stable goal — the planner decides whether to deliver or notify.
+            # Python never pre-computes the outcome anymore.
+            pddl_goals.append(f"(delivery-request-handled {item_name} {delivery_request['zone']})")
+
 
         if init_conditions_prev != pddl_init or goal_conditions_prev != pddl_goals:
             init_conditions_prev = pddl_init

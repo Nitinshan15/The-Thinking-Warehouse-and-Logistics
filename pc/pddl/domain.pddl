@@ -1,22 +1,3 @@
-;; ============================================================
-;; Domain: smart-zone-control (v5 -- matches real hardware flow)
-;;
-;; Two UI buttons ("deliver left" / "deliver right") ARE the
-;; delivery request -- direction is never a separate step, so
-;; the old "no direction chosen yet" edge case no longer exists.
-;;
-;; Sequence per button press:
-;;   1) delivery-requested-left/right becomes true (button press)
-;;   2) ultrasonic confirms product-available
-;;   3) gate motor opens -> gate-open (product slides)
-;;   4) end-of-slide motor guides it -> delivered (+ which side, for logging)
-;;
-;; Edge cases handled:
-;;   - product not available            -> notify-unavailable-*
-;;   - both buttons pressed at once      -> notify-direction-conflict,
-;;                                          blocks both gate-opens
-;;   - already delivered / stale flags   -> all re-firing blocked
-;; ============================================================
 
 (define (domain smart-zone-control)
 
@@ -55,11 +36,12 @@
     ;; --- 5) Delivery: button press = request + direction ---
     (delivery-requested-left        ?i - item ?z - zone)
     (delivery-requested-right       ?i - item ?z - zone)
-    (product-available               ?i - item ?z - zone)   ; ultrasonic pre-check
-    (delivery-unavailable-notified  ?i - item ?z - zone)
-    (gate-open                       ?i - item ?z - zone)     ; gate motor has opened
-    (delivered-left                  ?i - item)               ; which side it went, for logging
-    (delivered-right                 ?i - item)
+    (product-available              ?i - item ?z - zone)   ; set by ultrasonic sensor
+    (delivery-unavailable-notified  ?i - item ?z - zone)   ; set when no product found
+    (gate-open                      ?i - item ?z - zone)   ; gate motor has opened
+    (delivered-left                 ?i - item)             ; which side it went, for logging
+    (delivered-right                ?i - item)
+    (delivery-request-handled       ?i - item ?z - zone)   ; planner sets this as terminal goal
   )
 
   ;; ============================================================
@@ -157,8 +139,10 @@
     :precondition (and (gate-open ?i ?z)
                         (delivery-requested-left ?i ?z)
                         (not (delivered-left ?i))
-                        (not (delivered-right ?i)))
-    :effect (and (delivered-left ?i))
+                        (not (delivered-right ?i))
+                        (not (delivery-request-handled ?i ?z)))
+    :effect (and (delivered-left ?i)
+                 (delivery-request-handled ?i ?z))
   )
 
   (:action guide-right
@@ -166,19 +150,24 @@
     :precondition (and (gate-open ?i ?z)
                         (delivery-requested-right ?i ?z)
                         (not (delivered-left ?i))
-                        (not (delivered-right ?i)))
-    :effect (and (delivered-right ?i))
+                        (not (delivered-right ?i))
+                        (not (delivery-request-handled ?i ?z)))
+    :effect (and (delivered-right ?i)
+                 (delivery-request-handled ?i ?z))
   )
 
   ;; button pressed, but ultrasonic finds no product
+  ;; planner picks this branch autonomously when product-available is absent from :init
   (:action notify-unavailable-left
     :parameters (?i - item ?z - zone)
     :precondition (and (delivery-requested-left ?i ?z)
                         (not (product-available ?i ?z))
                         (not (delivery-unavailable-notified ?i ?z))
                         (not (delivered-left ?i))
-                        (not (delivered-right ?i)))
-    :effect (delivery-unavailable-notified ?i ?z)
+                        (not (delivered-right ?i))
+                        (not (delivery-request-handled ?i ?z)))
+    :effect (and (delivery-unavailable-notified ?i ?z)
+                 (delivery-request-handled ?i ?z))
   )
 
   (:action notify-unavailable-right
@@ -187,8 +176,10 @@
                         (not (product-available ?i ?z))
                         (not (delivery-unavailable-notified ?i ?z))
                         (not (delivered-left ?i))
-                        (not (delivered-right ?i)))
-    :effect (delivery-unavailable-notified ?i ?z)
+                        (not (delivered-right ?i))
+                        (not (delivery-request-handled ?i ?z)))
+    :effect (and (delivery-unavailable-notified ?i ?z)
+                 (delivery-request-handled ?i ?z))
   )
 
   (:action clear-unavailable-notice
