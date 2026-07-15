@@ -15,9 +15,17 @@
   (:init
     (zone-in-building zone1 building1)
 
-    (light-high zone1)
+    ;; --- Sensor states ---
+    (motion-detected zone1)
+    (light-normal zone1)
     (temperature-high zone1)
-    (humidity-high zone1)
+    (humidity-low zone1)
+
+    ;; --- Ultrasonic confirms product is physically present ---
+    (product-available item1 zone1)
+
+    ;; --- UI button: Deliver to Frankfurt = guide LEFT ---
+    (delivery-requested-left item1 zone1)
 
   )
 
@@ -26,6 +34,7 @@
       (led-on zone1)
       (fan-on zone1)
       (humidifier-on zone1)
+      (delivered-left item1)
     )
   )
 )
