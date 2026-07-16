@@ -40,8 +40,21 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER")
 SMTP_PASS = os.environ.get("SMTP_PASS")
 
-# Configure clean logging format for hardware execution
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Create output directory for logs
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+LOG_FILE = os.path.join(OUTPUT_DIR, "warehouse.log")
+
+# Configure clean logging format for hardware execution to both console and file
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger("WarehouseHardwareInterface")
 
 
@@ -220,7 +233,9 @@ class SmartWarehouseInterfaceGUI:
             self.mqtt_connected = True
             logger.info("Connected to MQTT broker")
             client.subscribe(f"{self.base_topic}/#", qos=0)
-            self._enqueue_gui_task(self._log_to_gui, "[MQTT] Connected and subscribed.")
+            # Also subscribe to delivery_ack so the Pi's confirmation is received
+            client.subscribe("delivery_ack", qos=1)
+            self._enqueue_gui_task(self._log_to_gui, "[MQTT] Connected and subscribed (sensors + delivery_ack).")
         else:
             self.mqtt_connected = False
             logger.error("MQTT connection failed with code %s", rc)
@@ -266,6 +281,40 @@ class SmartWarehouseInterfaceGUI:
                 seq_id, destination = next(iter(self._pending_deliveries.items()))
                 self._pending_deliveries.pop(seq_id, None)
                 self._on_mqtt_delivery_success_received(seq_id, destination)
+        elif sub_topic == "Motors status":
+            guide_val = data.get("guide_motor")
+            if getattr(self, "_pending_deliveries", None):
+                seq_id, destination = next(iter(self._pending_deliveries.items()))
+                if (guide_val == "left" and destination == "Frankfurt") or \
+                   (guide_val == "right" and destination == "Stuttgart"):
+                    self._pending_deliveries.pop(seq_id, None)
+                    self._on_mqtt_delivery_success_received(seq_id, destination)
+        elif topic == "delivery_ack":
+            # Pi publishes here after the guide motor completes its movement.
+            # Match by transaction_id to confirm the correct delivery.
+            ack_tx_id  = data.get("transaction_id")
+            ack_status = data.get("status", "")          # "delivered" or "failed"
+            ack_item   = ack_tx_id.split("_")[0] if (ack_tx_id and "_" in ack_tx_id) else "unknown"
+            pending    = getattr(self, "_pending_deliveries", {})
+            if ack_tx_id and ack_tx_id in pending:
+                destination = pending.pop(ack_tx_id)
+                if ack_status == "delivered":
+                    logger.info("[DELIVERY ACK] %s confirmed delivered (item=%s)", ack_tx_id, ack_item)
+                    self._on_mqtt_delivery_success_received(ack_tx_id, destination)
+                else:
+                    fail_msg = f"[DELIVERY ACK] Pi reported FAILURE for {ack_tx_id} (item={ack_item}). Check actuator."
+                    self._log_to_gui(fail_msg)
+                    if "delivery_request" in self.latest_sensors:
+                        del self.latest_sensors["delivery_request"]
+                    # Unlock UI even on failure so operator can retry
+                    self.is_waiting_for_mqtt = False
+                    self.active_destination = "None"
+                    self.btn_left_100.config(state="normal")
+                    self.btn_right_100.config(state="normal")
+                    self.motor_frame.config(text=" Logistic Dispatch Hub (Ready) ")
+                    self._update_telemetry_labels()
+            else:
+                logger.warning("[DELIVERY ACK] Unknown transaction_id '%s' — ignoring.", ack_tx_id)
 
     def _pending_destination_for(self, seq_id: str):
         return getattr(self, "_pending_deliveries", {}).pop(seq_id, None)
@@ -284,7 +333,6 @@ class SmartWarehouseInterfaceGUI:
 
     def _send_email_alert(self, subject: str, body: str):
         local_msg = f"[EMAIL ALERT] Target: {self.alert_email_recipient} | Subject: {subject} | Body: {body}."
-        logger.warning(local_msg)
         self._log_to_gui(local_msg)
 
         if not SMTP_USER or not SMTP_PASS:
@@ -302,11 +350,9 @@ class SmartWarehouseInterfaceGUI:
                 server.login(SMTP_USER, SMTP_PASS)
                 server.sendmail(SMTP_USER, [self.alert_email_recipient], msg.as_string())
             sent_msg = "[EMAIL ALERT] Sent via SMTP."
-            logger.info(sent_msg)
             self._log_to_gui(sent_msg)
         except Exception as e:
             err_msg = f"[EMAIL ALERT] Failed to send via SMTP: {e}"
-            logger.error(err_msg)
             self._log_to_gui(err_msg)
 
     def _fetch_weather_service(self) -> None:
@@ -465,6 +511,9 @@ class SmartWarehouseInterfaceGUI:
         self._publish_mqtt("inventory", str(payload_summary))
 
     def _log_to_gui(self, message: str) -> None:
+        # Also write all GUI logs to the file and stdout logger
+        logger.info(message)
+
         # Check if the scrollbar is currently at the very bottom (1.0 or very close to it)
         at_bottom = self.log_box.yview()[1] >= 0.99
 
@@ -625,7 +674,8 @@ class SmartWarehouseInterfaceGUI:
         motion,
         product,
         ultrasonic,
-        delivery_request ):
+        delivery_request,
+        motors_status=None ):
 
         # Placeholder for AI planning logic based on sensor inputs
         pddl_init = []
@@ -634,9 +684,11 @@ class SmartWarehouseInterfaceGUI:
         global init_conditions_prev, goal_conditions_prev
 
         if delivery_request and isinstance(delivery_request, dict):
-            item_name = f"item_{delivery_request['transaction_id']}"
+            item_name = f"item_{delivery_request.get('transaction_id', '1')}"
         else:
-            item_name = ""
+            # Predict the next item ID based on current delivery count
+            next_count = getattr(self, "delivery_count", 0) + 1
+            item_name = f"item_INV-001_{next_count}"
 
         if light:
             if motion["value"]:
@@ -723,6 +775,11 @@ class SmartWarehouseInterfaceGUI:
             # Python never pre-computes the outcome anymore.
             pddl_goals.append(f"(delivery-request-handled {item_name} {delivery_request['zone']})")
 
+        # Motor status (gate_motor, guide_motor) is tracked via MQTT in
+        # self.latest_sensors["Motors status"] for monitoring/display purposes.
+        # We do NOT translate motor states into PDDL init facts here —
+        # the planner decides what actions to take based on delivery requests and goals.
+
 
         if init_conditions_prev != pddl_init or goal_conditions_prev != pddl_goals:
             init_conditions_prev = pddl_init
@@ -743,6 +800,7 @@ class SmartWarehouseInterfaceGUI:
         product = self.latest_sensors.get("productdetected")
         ultrasonic = self.latest_sensors.get("ultrasonic")
         delivery_request = self.latest_sensors.get("delivery_request")
+        motors_status = self.latest_sensors.get("Motors status")
 
 
         self.aiplanner(
@@ -753,7 +811,8 @@ class SmartWarehouseInterfaceGUI:
             motion=motion,
             product=product,
             ultrasonic=ultrasonic,
-            delivery_request=delivery_request
+            delivery_request=delivery_request,
+            motors_status=motors_status
         )
 
         current_temp = 0
@@ -831,14 +890,20 @@ class SmartWarehouseInterfaceGUI:
         self.ax_temp.cla()
         self.ax_humid.cla()
 
-        self.ax_temp.plot(self.time_history, self.temp_history, color="#d35400", marker=".", linewidth=2)
+        x_indices = list(range(len(self.time_history)))
+
+        self.ax_temp.plot(x_indices, self.temp_history, color="#d35400", marker=".", linewidth=2)
         self.ax_temp.set_title("Live Temperature Stream (°C)")
         self.ax_temp.grid(True, linestyle="--", alpha=0.5)
+        self.ax_temp.set_xticks(x_indices)
+        self.ax_temp.set_xticklabels(self.time_history)
         self.ax_temp.tick_params(axis='x', rotation=35, labelsize=8)
 
-        self.ax_humid.plot(self.time_history, self.humid_history, color="#16a085", marker=".", linewidth=2)
+        self.ax_humid.plot(x_indices, self.humid_history, color="#16a085", marker=".", linewidth=2)
         self.ax_humid.set_title("Live Humidity Stream (%)")
         self.ax_humid.grid(True, linestyle="--", alpha=0.5)
+        self.ax_humid.set_xticks(x_indices)
+        self.ax_humid.set_xticklabels(self.time_history)
         self.ax_humid.tick_params(axis='x', rotation=35, labelsize=8)
 
         self.fig.tight_layout()
@@ -903,15 +968,59 @@ class SmartWarehouseInterfaceGUI:
         if self.is_waiting_for_mqtt:
             return
 
+        # -------------------------------------------------------
+        # Step 1: Ultrasonic pre-check — confirm product is present
+        # before touching inventory or publishing anything.
+        # This mirrors the PDDL domain's open-gate precondition:
+        #   (product-available ?i ?z)
+        # and the notify-unavailable-left/right actions.
+        # -------------------------------------------------------
+        ultrasonic_data = self.latest_sensors.get("ultrasonic")
+        product_data    = self.latest_sensors.get("productdetected")
+
+        product_physically_present = False
+        if isinstance(ultrasonic_data, dict):
+            raw       = ultrasonic_data.get("raw")
+            threshold = ultrasonic_data.get("threshold")
+            if raw is not None and threshold is not None:
+                product_physically_present = (raw <= threshold)
+            elif raw is not None:
+                product_physically_present = (raw > 0)
+        elif isinstance(product_data, dict):
+            # Fall back to binary product-detected flag if ultrasonic not yet received
+            product_physically_present = bool(product_data.get("present", False))
+
+        if not product_physically_present:
+            # PDDL equivalent: notify-unavailable-left / notify-unavailable-right
+            no_product_msg = (
+                f"⚠️  No product detected in the dispatch zone!\n\n"
+                f"Destination:  {destination}\n"
+                f"Direction:    {'Left (Frankfurt)' if 'left' in mqtt_payload else 'Right (Stuttgart)'}\n\n"
+                "Please place a package before retrying."
+            )
+            logger.warning("[DELIVERY ABORT] %s — no product detected by ultrasonic sensor.", destination)
+            self._log_to_gui(f"[DELIVERY ABORT] No product detected. Dispatch to {destination} cancelled.")
+            messagebox.showwarning("No Product Detected", no_product_msg)
+            return  # Abort — do NOT deduct stock or publish MQTT
+
+        # Clear any old/stale actuator feedback when beginning a new request
+        if "Motors status" in self.latest_sensors:
+            del self.latest_sensors["Motors status"]
+
+        # -------------------------------------------------------
+        # Step 2: Product confirmed — deduct inventory
+        # -------------------------------------------------------
         item_id = "INV-001"
         
         success, info = self.inventory_mgr.update_stock(item_id, -1)
         if not success:
             err_msg = f"[INVENTORY ABORT] Cannot dispatch to {destination}. Reason: Zero or Insufficient stock balance."
-            logger.error(err_msg)
             self._log_to_gui(err_msg)
             return
             
+        # -------------------------------------------------------
+        # Step 3: Lock UI and publish delivery_request over MQTT
+        # -------------------------------------------------------
         self.is_waiting_for_mqtt = True
         self.active_destination = destination
         self.btn_left_100.config(state="disabled")
@@ -929,11 +1038,10 @@ class SmartWarehouseInterfaceGUI:
         seq_id = f"{item_id}_{self.delivery_count}"
 
         msg = f"[LOGISTICS] Dispatching {destination}. Transaction ID: {seq_id} (Awaiting Callback...)"
-        logger.info(msg)
         self._log_to_gui(msg)
 
         delivery_payload = json.dumps({
-            "command": mqtt_payload,
+            "command": mqtt_payload,          # "deliver_left" or "deliver_right"
             "transaction_id": seq_id,
             "destination": destination,
         })
@@ -949,8 +1057,10 @@ class SmartWarehouseInterfaceGUI:
 
     def _on_mqtt_delivery_success_received(self, transaction_id: str, destination: str):
         success_msg = f"[MQTT SUB] Received Success Acknowledgment back for {transaction_id} at {destination}."
-        logger.info(success_msg)
         self._log_to_gui(success_msg)
+
+        if "delivery_request" in self.latest_sensors:
+            del self.latest_sensors["delivery_request"]
 
         self.is_waiting_for_mqtt = False
         self.active_destination = "None"
@@ -962,7 +1072,6 @@ class SmartWarehouseInterfaceGUI:
     def _send_notification(self, zone: str) -> bool:
         payload = {"zone": zone, "alert": "Dangerously High Sound Level"}
         msg = f"[NOTIFICATION] Alert dispatched: {payload}"
-        logger.warning(msg)
         self._log_to_gui(msg)
         return True
 

@@ -38,7 +38,7 @@
     (delivery-requested-right       ?i - item ?z - zone)
     (product-available              ?i - item ?z - zone)   ; set by ultrasonic sensor
     (delivery-unavailable-notified  ?i - item ?z - zone)   ; set when no product found
-    (gate-open                      ?i - item ?z - zone)   ; gate motor has opened
+    (gate-open                      ?z - zone)             ; gate motor has opened
     (delivered-left                 ?i - item)             ; which side it went, for logging
     (delivered-right                ?i - item)
     (delivery-request-handled       ?i - item ?z - zone)   ; planner sets this as terminal goal
@@ -128,15 +128,15 @@
                         (not (and (delivery-requested-left ?i ?z)
                                   (delivery-requested-right ?i ?z)))
                         (product-available ?i ?z)
-                        (not (gate-open ?i ?z))
+                        (not (gate-open ?z))
                         (not (delivered-left ?i))
                         (not (delivered-right ?i)))
-    :effect (gate-open ?i ?z)
+    :effect (gate-open ?z)
   )
 
   (:action guide-left
     :parameters (?i - item ?z - zone)
-    :precondition (and (gate-open ?i ?z)
+    :precondition (and (gate-open ?z)
                         (delivery-requested-left ?i ?z)
                         (not (delivered-left ?i))
                         (not (delivered-right ?i))
@@ -147,7 +147,7 @@
 
   (:action guide-right
     :parameters (?i - item ?z - zone)
-    :precondition (and (gate-open ?i ?z)
+    :precondition (and (gate-open ?z)
                         (delivery-requested-right ?i ?z)
                         (not (delivered-left ?i))
                         (not (delivered-right ?i))

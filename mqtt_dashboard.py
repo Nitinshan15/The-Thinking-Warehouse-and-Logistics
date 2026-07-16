@@ -22,6 +22,19 @@ MQTT_PASS = None  # Add password if required
 # Format: { topic: {"payload": str, "time": str, "count": int} }
 topic_data = defaultdict(lambda: {"payload": "", "time": "", "count": 0})
 
+# Find the next run number based on existing logs
+try:
+    import re
+    files = os.listdir(".")
+    pattern = re.compile(r"mqtt_dashboard_(\d+)\.log")
+    numbers = [int(m.group(1)) for f in files for m in [pattern.fullmatch(f)] if m]
+    RUN_NUMBER = max(numbers) + 1 if numbers else 1
+except Exception:
+    RUN_NUMBER = 1
+
+LOG_FILENAME = f"mqtt_dashboard_{RUN_NUMBER}.log"
+SNAPSHOT_FILENAME = f"mqtt_dashboard_snapshot_{RUN_NUMBER}.log"
+
 
 def make_dashboard_table() -> Table:
     """Generates the Rich Table containing the current MQTT state."""
@@ -81,6 +94,33 @@ def on_message(client, userdata, msg):
     topic_data[msg.topic]["time"] = datetime.now().strftime("%H:%M:%S")
     topic_data[msg.topic]["count"] += 1
 
+    # Log individual message to file
+    try:
+        with open(LOG_FILENAME, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] Topic: {msg.topic} | Payload: {payload}\n")
+    except Exception:
+        pass
+
+
+def log_dashboard_snapshot():
+    """Appends a clean ASCII snapshot of the current dashboard state to a log file."""
+    if not topic_data:
+        return
+    try:
+        with open(SNAPSHOT_FILENAME, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"\n--- DASHBOARD SNAPSHOT AT {timestamp} ---\n")
+            f.write(f"{'Topic':<60} | {'Latest Payload':<60} | {'Time':<10} | {'Msg Count':<10}\n")
+            f.write("-" * 148 + "\n")
+            for topic in sorted(topic_data.keys()):
+                data = topic_data[topic]
+                payload_str = str(data["payload"]).replace("\n", " ")
+                f.write(f"{topic:<60} | {payload_str:<60} | {data['time']:<10} | {str(data['count']):<10}\n")
+            f.write("-" * 148 + "\n")
+    except Exception:
+        pass
+
 
 # ==========================================
 # MAIN EXECUTION
@@ -116,12 +156,20 @@ def main():
 
     # Run the live-updating UI
     try:
+        last_snapshot_time = time.time()
         with Live(
             make_dashboard_table(), screen=True, auto_refresh=False
         ) as live:
             while True:
                 # Update the table UI with fresh data
                 live.update(make_dashboard_table(), refresh=True)
+                
+                # Save snapshot every 10 seconds
+                current_time = time.time()
+                if current_time - last_snapshot_time >= 10.0:
+                    last_snapshot_time = current_time
+                    log_dashboard_snapshot()
+
                 time.sleep(0.2)  # Limit UI redraw to ~5 times a second
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopping MQTT client...[/yellow]")
