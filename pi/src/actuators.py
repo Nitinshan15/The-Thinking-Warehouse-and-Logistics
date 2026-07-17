@@ -22,10 +22,22 @@ Delivery flow (orchestrated by main.py):
 import json
 import logging
 import time
+import sys
+from plugwise_control import PlugwiseController
 
 from mqtt_process import MQTTProcessor, load_mqtt_config
 
 import RPi.GPIO as GPIO
+
+
+
+PORT = "/dev/ttyUSB0"
+MY_PLUGS = ["000D6F0005693504", "000D6F0004B59311"]
+MAC_FAN = "000D6F0005693504"
+MAC_HUMIDIFIER = "000D6F0004B59311"
+
+controller = PlugwiseController(serial_port=PORT, mac_addresses=MY_PLUGS)
+controller.initialize()
 
 # Configure GPIO pins for the servos using physical board layout
 GPIO.setwarnings(False)
@@ -172,18 +184,58 @@ def _handle_delivery_request(payload_str: str):
     except Exception as exc:
         logger.error("[DELIVERY ACK] Failed to publish ack: %s", exc)
 
+def _handle_actions_request(payload_str: str):
+
+
+    raw_payload = payload_str
+    try:
+        actions_list = [line.strip() for line in raw_payload.split("\n") if line.strip()]
+    
+        print(f"\n[{time.strftime('%X')}] Received Action Batch. Processed List: {actions_list}")
+    
+        # 3. Iterate through the actions list and match commands
+        for action in actions_list:
+            
+            # --- FAN CONTROLS ---
+            if "turn-on-fan" in action:
+                print("[*] Target found: Fan -> Command: ON")
+                controller.turn_on(MAC_FAN)
+                
+            else:
+                print("[*] Target found: Fan -> Command: OFF")
+                controller.turn_off(MAC_FAN)
+                
+            # --- HUMIDIFIER CONTROLS ---
+            if "turn-on-humidifier" in action:
+                print("[*] Target found: Humidifier -> Command: ON")
+                controller.turn_on(MAC_HUMIDIFIER)
+                
+            else:
+                print("[*] Target found: Humidifier -> Command: OFF")
+                controller.turn_off(MAC_HUMIDIFIER)
+                
+                
+    except Exception as e:
+        print(f"[-] Failed to process MQTT command action: {e}")
 
 # ---------------------------------------------------------------------------
 # MQTT callbacks
 # ---------------------------------------------------------------------------
 
-def _on_connect(client, userdata, flags, rc, *args):
+def _on_connect(client, userdata, flags, rc):
     if rc == 0:
-        topic = f"{processor.building}/{processor.floor}/{processor.zone}/delivery_request"
-        logger.info("Connected to MQTT broker — subscribing to '%s'", topic)
-        client.subscribe(topic, qos=1)
+        logger.info("Connected to MQTT Broker successfully.")
+        
+        # Define topics relative to the shared processor
+        delivery_topic = f"{processor.building}/{processor.floor}/{processor.zone}/delivery_request"
+        actions_topic  = f"{processor.building}/{processor.floor}/{processor.zone}/actions"
+        
+        # 💡 SUBSCRIPTIONS HAPPEN HERE NOW
+        client.subscribe(delivery_topic, qos=1)
+        client.subscribe(actions_topic, qos=1)
+        logger.info("Subscribed/Re-subscribed to topics.")
     else:
-        logger.error("MQTT connection failed (rc=%s)", rc)
+        logger.error("Connection failed with code %d", rc)
 
 
 def _on_message(client, userdata, msg):
@@ -191,7 +243,9 @@ def _on_message(client, userdata, msg):
     payload = msg.payload.decode("utf-8", errors="replace")
     logger.info("[MQTT] Received on '%s': %s", topic, payload)
 
-    expected_topic = f"{processor.building}/{processor.floor}/{processor.zone}/delivery_request"
-    if topic == expected_topic:
+    delivery_topic = f"{processor.building}/{processor.floor}/{processor.zone}/delivery_request"
+    actions_topic  = f"{processor.building}/{processor.floor}/{processor.zone}/actions"
+    if topic == delivery_topic:
         _handle_delivery_request(payload)
-
+    if topic == actions_topic:
+        _handle_actions_request(payload)
