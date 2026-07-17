@@ -58,14 +58,6 @@ logging.basicConfig(
 logger = logging.getLogger("WarehouseHardwareInterface")
 
 
-
-class DeviceType(Enum):
-    LIGHT = "light"
-    FAN = "fan"
-    HUMIDIFIER = "humidifier"
-    MOTOR = "motor"
-
-
 class InventoryManager:
     """Handles core repository logic for warehouse inventory items via a persistent JSON database file."""
     def __init__(self, filename: str = "inventory.json"):
@@ -409,11 +401,11 @@ class SmartWarehouseInterfaceGUI:
         self.motor_frame.pack(fill="x", padx=10, pady=6)
 
         self.btn_left_100 = ttk.Button(self.motor_frame, text="📍 Deliver to Frankfurt", style="Accent.TButton", 
-                                  command=lambda: self._execute_delivery(destination="Frankfurt", mqtt_payload="deliver_left", is_clockwise=False))
+                                  command=lambda: self._execute_delivery(destination="Frankfurt", mqtt_payload="deliver_left"))
         self.btn_left_100.pack(side="left", fill="x", expand=True, padx=8, pady=6)
 
         self.btn_right_100 = ttk.Button(self.motor_frame, text="Deliver to Stuttgart 📍", style="Accent.TButton", 
-                                   command=lambda: self._execute_delivery(destination="Stuttgart", mqtt_payload="deliver_right", is_clockwise=True))
+                                   command=lambda: self._execute_delivery(destination="Stuttgart", mqtt_payload="deliver_right"))
         self.btn_right_100.pack(side="right", fill="x", expand=True, padx=8, pady=6)
 
         # Operator Panel Control Frame
@@ -754,18 +746,21 @@ class SmartWarehouseInterfaceGUI:
                 pddl_init.append(f"(sound-high {sound['zone']})")
                 pddl_goals.append(f"(send-notification {sound['zone']})")
 
-        if ultrasonic:
-            zone.add(ultrasonic['zone'])
-            if ultrasonic["raw"] <= ultrasonic["threshold"]:
-                # Product detected — planner will see product-available and choose
-                # open-gate -> guide-left/right -> delivery-request-handled
-                pddl_init.append(f"(product-available {item_name} {ultrasonic['zone']})")
-            # If NOT detected — we simply omit product-available from :init.
-            # The planner will then autonomously pick notify-unavailable-left/right
-            # because open-gate requires (product-available ...) as a precondition.
+
 
         if delivery_request:
             zone.add(delivery_request['zone'])
+
+            if ultrasonic:
+                zone.add(ultrasonic['zone'])
+                if ultrasonic["raw"] <= ultrasonic["threshold"]:
+                    # Product detected — planner will see product-available and choose
+                    # open-gate -> guide-left/right -> delivery-request-handled
+                    pddl_init.append(f"(product-available {item_name} {ultrasonic['zone']})")
+                # If NOT detected — we simply omit product-available from :init.
+                # The planner will then autonomously pick notify-unavailable-left/right
+                # because open-gate requires (product-available ...) as a precondition.
+
             if delivery_request["command"] == "deliver_left":
                 pddl_init.append(f"(delivery-requested-left {item_name} {delivery_request['zone']})")
             elif delivery_request["command"] == "deliver_right":
@@ -964,7 +959,7 @@ class SmartWarehouseInterfaceGUI:
 
         self.root.after(4000, self._refresh_telemetry_loop)
 
-    def _execute_delivery(self, destination: str, mqtt_payload: str, is_clockwise: bool) -> None:
+    def _execute_delivery(self, destination: str, mqtt_payload: str) -> None:
         if self.is_waiting_for_mqtt:
             return
 
