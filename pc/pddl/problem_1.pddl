@@ -1,45 +1,52 @@
-;; ============================================================
-;; Problem instance — zone1 / building1
-;;
-;; The goal is always (delivery-request-handled item1 zone1).
-;; The planner decides the path:
-;;   - product-available present in :init  -> open-gate -> guide-left -> handled
-;;   - product-available absent  in :init  -> notify-unavailable-left  -> handled
-;;
-;; To simulate "no product": remove the (product-available ...) line below.
-;; ============================================================
-
-(define (problem zone1-building1-deliver-frankfurt)
+(define (problem smart-zone-prob-zone1)
   (:domain smart-zone-control)
 
-  (:objects
-    building1 - building
-    zone1     - zone
-    item1     - item
+  (:objects 
+    b1 - building
+    zone1 - zone
+    item1 - item
   )
 
   (:init
-    (zone-in-building zone1 building1)
+    ;; --- INFRASTRUCTURE ---
+    (zone-in-building zone1 b1)
 
-    ;; --- Sensor states (raw, as received from Pi via MQTT) ---
+    ;; --- GLOBAL WEATHER ---
+    (outdoor-hot)
+    (outdoor-raining)
+
+    ;; --- ZONE 1 STATE ---
+    
+    ;; HVAC: It is cold inside, but hot and raining outside
+    (indoor-cold zone1)
+    (window-closed zone1)
+    (fan-off zone1)
+    (heater-off zone1)
+    
+    ;; Lighting: Someone is there, and it's dark
     (motion-detected zone1)
-    (light-normal zone1)
-    (temperature-high zone1)
+    (light-low zone1)
+    
+    ;; Humidity: The air is dry
     (humidity-low zone1)
-
-    ;; --- Ultrasonic: include this fact if sensor detects product ---
-    ;; --- Omit it if no product is present — planner will notify  ---
+    
+    ;; Delivery: Someone requested item1 to the right side, and they are in the chute
+    (delivery-requested-right item1 zone1)
     (product-available item1 zone1)
-
-    ;; --- UI button: Frankfurt = Left, Stuttgart = Right ---
-    (delivery-requested-left item1 zone1)
   )
 
-  (:goal
-    (and
-      (led-on zone1)
-      (fan-on zone1)
-      (humidifier-on zone1)
+  (:goal 
+    (and 
+      ;; 1. HVAC Goal
+      (comfortable zone1)
+      
+      ;; 2. Humidity Goal
+      (control-humidity zone1)
+      
+      ;; 3. Lighting Goal
+      (control-lights zone1)
+      
+      ;; 4. Delivery Goal
       (delivery-request-handled item1 zone1)
     )
   )

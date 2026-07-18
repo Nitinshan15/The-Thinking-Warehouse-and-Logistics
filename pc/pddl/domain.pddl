@@ -1,7 +1,7 @@
 
 (define (domain smart-zone-control)
 
-  (:requirements :strips :typing :negative-preconditions :disjunctive-preconditions)
+  (:requirements :strips :typing :negative-preconditions :disjunctive-preconditions )
 
   (:types
     building
@@ -19,20 +19,33 @@
     (light-high      ?z - zone)
     (led-on          ?z - zone)
     
-    ;; --- 2) Temperature / fan ---
-    (temperature-high   ?z - zone)
-    (temperature-normal ?z - zone)
-    (fan-on             ?z - zone)
-    
-    ;; --- 3) Humidity / humidifier (on when LOW) ---
+
     (humidity-low    ?z - zone)
-    (humidity-normal ?z - zone)
-    (humidifier-on   ?z - zone)
+    (humidifier-on       ?z - zone)
 
-    ;; --- 4) Sound / notification ---
-    (sound-high        ?z - zone)
-    (send-notification ?z - zone)
+    ;; Global Outdoor Sensors
+    (outdoor-temp-hot)
+    (outdoor-temp-cold)
+    (outdoor-raining) ;; NEW VARIABLE
 
+    ;; Zoned Indoor Sensors
+    (indoor-temp-hot ?z - zone)
+    (indoor-temp-cold ?z - zone)
+    (indoor-temp-ideal ?z - zone)
+
+    ;; Zoned Actuators
+    (window-open ?z - zone)
+    (window-closed ?z - zone)
+    (fan-on ?z - zone)
+    (fan-off ?z - zone)
+    (heater-on ?z - zone)
+    (heater-off ?z - zone)
+
+    ;; Zoned Goal State
+    (comfortable ?z - zone)
+    (control-lights ?z - zone)
+    (control-humidity ?z - zone)
+    
     ;; --- 5) Delivery: button press = request + direction ---
     (delivery-requested-left        ?i - item ?z - zone)
     (delivery-requested-right       ?i - item ?z - zone)
@@ -48,72 +61,140 @@
   ;; 1) AMBIENCE LIGHT
   ;; ============================================================
 
-  (:action turn-on-light
+  
+
+
+;; Rule: If motion + low light + we WANT lights on -> Turn them on
+  (:action lights-on
     :parameters (?z - zone)
-    :precondition (and (motion-detected ?z)
-                       (or (light-low ?z) (light-normal ?z))
-                       (not (led-on ?z)))
-    :effect (led-on ?z)
+    :precondition (and (motion-detected ?z) 
+                       (or (light-low ?z) (light-normal ?z)))
+    :effect (and (led-on ?z) (control-lights ?z))
   )
 
-  (:action turn-off-light-no-motion
+  ;; Rule: If NO motion OR bright enough + we WANT lights off -> Ensure they are off
+  (:action lights-off
     :parameters (?z - zone)
-    :precondition (and (led-on ?z) (not (motion-detected ?z)))
-    :effect (not (led-on ?z))
+    :precondition (or (not (motion-detected ?z)) (light-high ?z))
+    :effect (and (not (led-on ?z)) (control-lights ?z))
   )
-
-  (:action turn-off-light-bright-enough
-    :parameters (?z - zone)
-    :precondition (and (led-on ?z) (light-high ?z))
-    :effect (not (led-on ?z))
-  )
-
-  ;; ============================================================
-  ;; 2) TEMPERATURE
-  ;; ============================================================
-
-  (:action turn-on-fan
-    :parameters (?z - zone)
-    :precondition (and (temperature-high ?z) (not (fan-on ?z)))
-    :effect (fan-on ?z)
-  )
-
-  (:action turn-off-fan
-    :parameters (?z - zone)
-    :precondition (and (fan-on ?z) (temperature-normal ?z))
-    :effect (not (fan-on ?z))
-  )
-
+  
   ;; ============================================================
   ;; 3) HUMIDITY
   ;; ============================================================
 
-  (:action turn-on-humidifier
+
+;; --- HUMIDITY RULE EVALUATORS ---
+
+  ;; Rule: If humidity is low, we want the humidifier ON
+  (:action humidifier-turn-on
     :parameters (?z - zone)
-    :precondition (and (humidity-low ?z) (not (humidifier-on ?z)))
-    :effect (humidifier-on ?z)
+    :precondition (humidity-low ?z)
+    :effect (and (humidifier-on ?z) (control-humidity ?z))
   )
 
-  (:action turn-off-humidifier
+  ;; Rule: If humidity is NOT low, we want the humidifier OFF
+  (:action humidifier-turn-off
     :parameters (?z - zone)
-    :precondition (and (humidifier-on ?z) (humidity-normal ?z))
-    :effect (not (humidifier-on ?z))
+    :precondition (not (humidity-low ?z))
+    :effect (and (not (humidifier-on ?z)) (control-humidity ?z))
   )
 
-  ;; ============================================================
-  ;; 4) SOUND
-  ;; ============================================================
-
-  (:action trigger-notification
+;; --- ACTUATOR ACTIONS ---
+  
+  (:action open-window
     :parameters (?z - zone)
-    :precondition (and (sound-high ?z) (not (send-notification ?z)))
-    :effect (send-notification ?z)
+    ;; Prevent opening the window if it is raining
+    :precondition (and (window-closed ?z) (not (outdoor-raining)))
+    :effect (and (window-open ?z) (not (window-closed ?z)))
   )
 
-  (:action clear-notification
+  (:action close-window
     :parameters (?z - zone)
-    :precondition (and (send-notification ?z) (not (sound-high ?z)))
-    :effect (not (send-notification ?z))
+    :precondition (window-open ?z)
+    :effect (and (window-closed ?z) (not (window-open ?z)))
+  )
+
+  (:action turn-fan-on
+    :parameters (?z - zone)
+    :precondition (fan-off ?z)
+    :effect (and (fan-on ?z) (not (fan-off ?z)))
+  )
+
+  (:action turn-fan-off
+    :parameters (?z - zone)
+    :precondition (fan-on ?z)
+    :effect (and (fan-off ?z) (not (fan-on ?z)))
+  )
+
+  (:action turn-heater-on
+    :parameters (?z - zone)
+    :precondition (heater-off ?z)
+    :effect (and (heater-on ?z) (not (heater-off ?z)))
+  )
+
+  (:action turn-heater-off
+    :parameters (?z - zone)
+    :precondition (heater-on ?z)
+    :effect (and (heater-off ?z) (not (heater-on ?z)))
+  )
+
+  ;; --- DECISION TREE RULE EVALUATORS ---
+
+  ;; Rule 1 (DRY): Outdoor Hot, Indoor Cold, Not Raining -> Open Window
+  (:action rule-hot-out-cold-in-dry
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-hot) (indoor-temp-cold ?z) (not (outdoor-raining)) (window-open ?z))
+    :effect (comfortable ?z)
+  )
+
+  ;; Rule 1 (RAINING): Outdoor Hot, Indoor Cold, Raining -> Keep Window Closed, Heater ON
+  (:action rule-hot-out-cold-in-raining
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-hot) (indoor-temp-cold ?z) (outdoor-raining) (window-closed ?z) (heater-on ?z))
+    :effect (comfortable ?z)
+  )
+  ;; Rule 2: Outdoor Hot, Indoor Ideal -> Close Window, Fan OFF
+  ;; (Naturally compatible with rain since it already requires a closed window)
+  (:action rule-hot-out-ideal-in
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-hot) (indoor-temp-ideal ?z) (window-closed ?z) (fan-off ?z))
+    :effect (comfortable ?z)
+  )
+
+  ;; Rule 3: Outdoor Hot, Indoor Hot -> Close Window, Fan ON
+  (:action rule-hot-out-hot-in
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-hot) (indoor-temp-hot ?z) (window-closed ?z) (fan-on ?z))
+    :effect (comfortable ?z)
+  )
+
+  ;; Rule 4: Outdoor Cold, Indoor Cold -> Heater ON, Close Window
+  (:action rule-cold-out-cold-in
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-cold) (indoor-temp-cold ?z) (window-closed ?z) (heater-on ?z))
+    :effect (comfortable ?z)
+  )
+
+  ;; Rule 5: Outdoor Cold, Indoor Ideal -> Close Window, Fan OFF
+  (:action rule-cold-out-ideal-in
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-cold) (indoor-temp-ideal ?z) (window-closed ?z) (fan-off ?z))
+    :effect (comfortable ?z)
+  )
+
+  ;; Rule 6 (DRY): Outdoor Cold, Indoor Hot, Not Raining -> Open Window
+  (:action rule-cold-out-hot-in-dry
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-cold) (indoor-temp-hot ?z) (not (outdoor-raining)) (window-open ?z))
+    :effect (comfortable ?z)
+  )
+
+;; Rule 6 (RAINING): Outdoor Cold, Indoor Hot, Raining -> Keep Window Closed, Fan ON
+  (:action rule-cold-out-hot-in-raining
+    :parameters (?z - zone)
+    :precondition (and (outdoor-temp-cold) (indoor-temp-hot ?z) (outdoor-raining) (window-closed ?z) (fan-on ?z))
+    :effect (comfortable ?z)
   )
 
   ;; ============================================================
