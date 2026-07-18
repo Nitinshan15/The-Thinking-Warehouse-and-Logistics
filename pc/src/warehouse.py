@@ -7,10 +7,12 @@ import json
 import queue
 import shutil
 import subprocess
+import urllib.parse
+import urllib.request
 from enum import Enum
 from typing import Dict, Any, Tuple, List
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, simpledialog  # Added simpledialog for simulated inputs
 import random
 
 # --- Graphing Libraries ---
@@ -127,6 +129,10 @@ class SmartWarehouseInterfaceGUI:
         self.style.configure("TLabelframe.Label", font=("Helvetica", 10, "bold"), foreground="#2c3e50")
         self.style.configure("Accent.TButton", font=("Helvetica", 10, "bold"), foreground="white", background="#2980b9")
         self.style.map("Accent.TButton", background=[('active', '#3498db'), ('disabled', '#bdc3c7')], foreground=[('disabled', '#7f8c8d')])
+
+        # Dynamic State Variables
+        self.night_mode = False
+        self.weather_simulated = False
 
         # Initialize Core Managers and History Data Lists for Graphs
         self.inventory_mgr = InventoryManager()
@@ -347,11 +353,129 @@ class SmartWarehouseInterfaceGUI:
             err_msg = f"[EMAIL ALERT] Failed to send via SMTP: {e}"
             self._log_to_gui(err_msg)
 
+    def _describe_weather_code(self, weather_code: Any) -> str:
+        rain_codes = {51, 53, 55, 61, 63, 65, 80, 95}
+        if weather_code is None:
+            return "Unknown"
+        try:
+            code = int(weather_code)
+        except (TypeError, ValueError):
+            return "Unknown"
+        return "Raining" if code in rain_codes else "Not Raining"
+
+    def _get_live_weather_data(self) -> Dict[str, Any]:
+        city = os.environ.get("WEATHER_CITY", "Stuttgart")
+        lat = os.environ.get("WEATHER_LAT")
+        lon = os.environ.get("WEATHER_LON")
+        city_name = city
+
+        try:
+            if lat and lon:
+                latitude = lat
+                longitude = lon
+            else:
+                geocode_url = (
+                    "https://geocoding-api.open-meteo.com/v1/search?"
+                    f"name={urllib.parse.quote(city)}&count=1&language=en&format=json"
+                )
+                with urllib.request.urlopen(geocode_url, timeout=8) as response:
+                    geodata = json.load(response)
+
+                if not geodata.get("results"):
+                    raise ValueError(f"No geocoding results for city {city}")
+
+                result = geodata["results"][0]
+                city_name = result.get("name", city)
+                latitude = result["latitude"]
+                longitude = result["longitude"]
+
+            forecast_url = (
+                "https://api.open-meteo.com/v1/forecast?"
+                f"latitude={latitude}&longitude={longitude}&current=temperature_2m,relative_humidity_2m,weather_code&timezone=auto"
+            )
+            with urllib.request.urlopen(forecast_url, timeout=8) as response:
+                forecast_data = json.load(response)
+
+            current = forecast_data.get("current", {})
+            weather_code = current.get("weather_code")
+            temperature_c = round(float(current.get("temperature_2m", 0.0)), 1)
+            humidity_pct = int(current.get("relative_humidity_2m", 0))
+            description = self._describe_weather_code(weather_code)
+
+            return {
+                "city": city_name,
+                "temperature_c": temperature_c,
+                "humidity_pct": humidity_pct,
+                "description": description,
+                "weather_code": weather_code,
+                "source": "Open-Meteo",
+                "display": f"{temperature_c}°C, {description}"
+            }
+        except Exception as exc:
+            logger.warning("Weather fetch failed: %s", exc)
+            return {
+                "city": city_name,
+                "temperature_c": None,
+                "humidity_pct": None,
+                "description": "Unavailable",
+                "weather_code": None,
+                "source": "Open-Meteo",
+                "display": "Unavailable"
+            }
+
     def _fetch_weather_service(self) -> None:
-        self.mock_weather_data = "22°C, Scattered Clouds (OpenWeather API)"
-        self.lbl_weather.config(text=f"Outdoor Weather: {self.mock_weather_data}")
-        self._publish_mqtt("currentstate", f"Temp: 26.5, Humidity: 35.0, Weather: {self.mock_weather_data}")
+        if not self.weather_simulated:
+            weather_data = self._get_live_weather_data()
+            self.latest_weather = weather_data
+            self.lbl_weather.config(text=f"Outdoor Weather: {weather_data['display']}")
+            #self._publish_mqtt("weather", json.dumps(weather_data))
+            self._publish_mqtt(
+                "Weather_Outdoor",
+                f"Temp: {weather_data['temperature_c'] if weather_data['temperature_c'] is not None else 'N/A'}, "
+                f"Humidity: {weather_data['humidity_pct'] if weather_data['humidity_pct'] is not None else 'N/A'}, "
+                f"Weather: {weather_data['description'] if weather_data['description'] is not None else 'N/A'}"
+            )
         self.root.after(30000, self._fetch_weather_service)
+
+    def _toggle_night_mode(self):
+        """Changes the UI color theme and arms security alerts for active motion."""
+        self.night_mode = not self.night_mode
+        if self.night_mode:
+            self.btn_night.config(text="☀️ Disable Night Mode")
+            self.style.configure(".", background="#2c3e50", foreground="#ffffff")
+            self.style.configure("TLabelframe.Label", background="#2c3e50", foreground="#ecf0f1")
+            self.root.configure(background="#2c3e50")
+            self._log_to_gui("[SYSTEM] Night Mode Enabled. Motion alerts armed.")
+        else:
+            self.btn_night.config(text="🌙 Enable Night Mode")
+            self.style.configure(".", background="#f0f0f0", foreground="#000000")
+            self.style.configure("TLabelframe.Label", background="#f0f0f0", foreground="#2c3e50")
+            self.root.configure(background="#f0f0f0")
+            self._log_to_gui("[SYSTEM] Night Mode Disabled.")
+
+    def _trigger_weather_simulation(self):
+        """Prompts operator for customized real-time environmental input values."""
+        temp = simpledialog.askfloat("Simulation Config", "Enter Temperature (°C):", parent=self.root)
+        if temp is None: return
+        humid = simpledialog.askinteger("Simulation Config", "Enter Humidity Percentage (%):", parent=self.root)
+        if humid is None: return
+        desc = simpledialog.askstring("Simulation Config", "Enter Weather Status Description:", parent=self.root)
+        if desc is None: return
+
+        self.weather_simulated = True
+        simulated_data = {
+            "city": "Simulated Matrix",
+            "temperature_c": temp,
+            "humidity_pct": humid,
+            "description": desc,
+            "weather_code": 0,
+            "source": "Manual Simulation Override",
+            "display": f"{temp}°C, {desc} (Simulated)"
+        }
+        self.latest_weather = simulated_data
+        self.lbl_weather.config(text=f"Outdoor Weather: {simulated_data['display']}")
+        self._publish_mqtt("Weather_Outdoor", json.dumps(simulated_data))
+        self._log_to_gui(f"[WEATHER SIM] Weather telemetry manually locked to: {simulated_data['display']}")
 
     def _setup_ui(self) -> None:
         notebook = ttk.Notebook(self.root)
@@ -388,7 +512,11 @@ class SmartWarehouseInterfaceGUI:
         # self.lbl_motor.grid(row=2, column=1, sticky="w", padx=15, pady=6)
 
         self.lbl_weather = ttk.Label(telemetry_frame, text="Outdoor Weather: Fetching...", foreground="#2980b9", font=("Helvetica", 10, "italic"))
-        self.lbl_weather.grid(row=3, column=0, columnspan=2, sticky="w", padx=15, pady=8)
+        self.lbl_weather.grid(row=3, column=0, sticky="w", padx=15, pady=8)
+
+        # Added Weather Simulator Button
+        self.btn_sim_weather = ttk.Button(telemetry_frame, text="⚙️ Simulated", command=self._trigger_weather_simulation)
+        self.btn_sim_weather.grid(row=3, column=1, sticky="w", padx=15, pady=4)
 
         self.lbl_product = ttk.Label(telemetry_frame, text="Product Detected: --")
         self.lbl_product.grid(row=4, column=0, sticky="w", padx=15, pady=6)
@@ -411,6 +539,10 @@ class SmartWarehouseInterfaceGUI:
         # Operator Panel Control Frame
         control_frame = ttk.LabelFrame(tab_operations, text=" Operator Panel Controls ", padding=12)
         control_frame.pack(fill="x", padx=10, pady=6)
+
+        # Added Night Mode Button Interface Element
+        self.btn_night = ttk.Button(control_frame, text="🌙 Enable Night Mode", command=self._toggle_night_mode)
+        self.btn_night.pack(fill="x", pady=4)
 
         ttk.Button(control_frame, text="❌ Exit Control Panel", command=self.root.quit).pack(fill="x", pady=4)
 
@@ -687,65 +819,43 @@ class SmartWarehouseInterfaceGUI:
                 zone.add(motion['zone'])
                 # FIX: Wrap predicate in parentheses ( )
                 pddl_init.append(f"(motion-detected {motion['zone']})")
-                zone.add(light['zone'])
-                if(light["raw"] >= light["lighthigh_threshold"]):
-                    
-                    pddl_init.append(f"(light-high {light['zone']})")
-                    pddl_goals.append(f"(not (led-on {light['zone']}))")
+                
 
-                elif(light["raw"] >= light["lightlow_threshold"] and light["raw"] < light["lighthigh_threshold"]):
-                    
-                    pddl_init.append(f"(light-normal {light['zone']})")
-                    pddl_goals.append(f"(led-on {light['zone']})")
+            
+            zone.add(light['zone'])
+            pddl_goals.append(f"(control-lights {light['zone']})")
 
-                else:
-                    
-                    pddl_init.append(f"(light-low {light['zone']})")
-                    pddl_goals.append(f"(led-on {light['zone']})")
+            if(light["raw"] >= light["lighthigh_threshold"]):
+                pddl_init.append(f"(light-high {light['zone']})")
+
+            elif(light["raw"] >= light["lightlow_threshold"] and light["raw"] < light["lighthigh_threshold"]):
+                pddl_init.append(f"(light-normal {light['zone']})")
 
             else:
-                zone.add(light['zone'])
-                
-                pddl_goals.append(f"(not (led-on {light['zone']}))")
-
-                if(light["raw"] >= light["lighthigh_threshold"]):
-                    pddl_init.append(f"(light-high {light['zone']})")
-
-                elif(light["raw"] >= light["lightlow_threshold"] and light["raw"] < light["lighthigh_threshold"]):
-                    pddl_init.append(f"(light-normal {light['zone']})")
-
-                else:
-                    pddl_init.append(f"(light-low {light['zone']})")
+                pddl_init.append(f"(light-low {light['zone']})")
 
         if temperature:
             zone.add(temperature['zone'])
-            if(temperature["temperature_c"] >= temperature["threshold"]):
+            if(temperature["temperature_c"] >= temperature["temphigh_threshold"]):
                 
-                pddl_init.append(f"(temperature-high {temperature['zone']})")
-                pddl_goals.append(f"(fan-on {temperature['zone']})")
+                pddl_init.append(f"(indoor-temp-hot {temperature['zone']})")
+            
+            elif(temperature["temperature_c"] < temperature["templow_threshold"] ):
+                
+                pddl_init.append(f"(indoor-temp-cold {temperature['zone']})")
+
             else:
-                
-                pddl_init.append(f"(temperature-normal {temperature['zone']})")
-                pddl_goals.append(f"(not (fan-on {temperature['zone']}))")
+
+                pddl_init.append(f"(indoor-temp-ideal {temperature['zone']})")
+            pddl_goals.append(f"(comfortable {temperature['zone']})")
 
         if humidity:
             zone.add(humidity['zone'])
-            if(humidity["humidity_pct"] >= humidity["threshold"]):
-                
-                pddl_init.append(f"(humidity-normal {humidity['zone']})")
-                pddl_goals.append(f"(not (humidifier-on {humidity['zone']}))")
-            else:
+            if(humidity["humidity_pct"] <= humidity["threshold"]):
                 
                 pddl_init.append(f"(humidity-low {humidity['zone']})")
-                pddl_goals.append(f"(humidifier-on {humidity['zone']})")
-
-        if sound:
-            zone.add(sound['zone'])
-            if(sound["raw_max"] >= sound["threshold"]):
-                
-                pddl_init.append(f"(sound-high {sound['zone']})")
-                pddl_goals.append(f"(send-notification {sound['zone']})")
-
+                        
+            pddl_goals.append(f"(control-humidity {humidity['zone']})")
 
 
         if delivery_request:
@@ -853,7 +963,15 @@ class SmartWarehouseInterfaceGUI:
             elif raw_value is not None:
                 sound_label = "High" if raw_value > 0 else "Low"
 
-        if isinstance(product, dict):
+        if isinstance(ultrasonic, dict):
+            raw_val = ultrasonic.get("raw")
+            thresh_val = ultrasonic.get("threshold")
+            if raw_val is not None and thresh_val is not None:
+                product_present = (raw_val <= thresh_val)
+            elif raw_val is not None:
+                product_present = (raw_val > 0)
+
+        if product_present is None and isinstance(product, dict):
             product_present = product.get("present")
             if product_present is not None:
                 product_present = bool(product_present)
@@ -917,8 +1035,9 @@ class SmartWarehouseInterfaceGUI:
         self.lbl_humidity.config(text=f"Humidity Level: {data['humidity']}%")
 
         if data["product_present"] is not None:
-            product_str = "[ PRESENT ]" if data["product_present"] else "[ ABSENT ]"
-            self.lbl_product.config(text=f"Product Detected: {product_str}", foreground="#27ae60" if data["product_present"] else "#7f8c8d")
+            is_present = data["product_present"] in [True, "True", "true", "present", "PRESENT"]
+            product_str = "[ PRESENT ]" if is_present else "[ ABSENT ]"
+            self.lbl_product.config(text=f"Product Detected: {product_str}", foreground="#27ae60" if is_present else "#7f8c8d")
 
         if data["ultrasonic"] is not None:
             self.lbl_ultrasonic.config(text=f"Ultrasonic (calibrated): {data['ultrasonic']}")
@@ -946,6 +1065,13 @@ class SmartWarehouseInterfaceGUI:
 
             self._update_plots(ts, data["temperature"], data["humidity"])
             self._update_telemetry_labels()
+
+            # Automated email alert if motion is detected when Night Mode is armed
+            if self.night_mode and data["motion_detected"]:
+                self._send_email_alert(
+                    "SECURITY BREACH: Motion Detected during Night Mode!", 
+                    f"Warning: Facility motion sensor was triggered at {ts} while Night Mode was active."
+                )
 
             if data["sound_level"] == "High":
                 self._send_email_alert("Dangerously High Sound Level", f"Alert! Sound registered as {data['sound_level']}.")

@@ -165,12 +165,12 @@ def read_temperature_and_humidity_raw(config):
 
     temp_cfg = config.get("temperature_sensor", {})
     hum_cfg = config.get("humidity_sensor", {})
-    temp_threshold = temp_cfg.get("temphigh_threshold") 
     humidity_threshold = hum_cfg.get("humidityhigh_threshold") or hum_cfg.get("humidifieroff_threshold")
     return {
         "temperature_c": temp,
         "humidity_pct": humidity,
-        "temperature_threshold": temp_threshold,
+        "temphigh_threshold": temp_cfg.get("temphigh_threshold"),
+        "templow_threshold": temp_cfg.get("templow_threshold"),
         "humidity_threshold": humidity_threshold,
     }
 

@@ -46,6 +46,8 @@ def _sensor_loop(processor: MQTTProcessor, mqtt_cfg: dict) -> None:
             sensor_cfg = load_config()
             data = gather_readings(sensor_cfg, zone=zone)
 
+            #print(f"\n[{time.strftime('%X')}] Publishing sensor readings: {data}")
+
             for name, val in data["sensors"].items():
                 processor.publish_sensor(name, val, timestamp=data.get("timestamp"))
 
@@ -80,13 +82,13 @@ def main() -> None:
     processor.client.on_connect = actuators._on_connect
     processor.client.on_message = actuators._on_message
 
-    # Manually subscribe now (in case connection was established before callbacks were set)
-    try:
-        topic = f"{processor.building}/{processor.floor}/{processor.zone}/delivery_request"
-        processor.client.subscribe(topic, qos=1)
-        logger.info("Subscribed to '%s'", topic)
-    except Exception as exc:
-        logger.error("Failed to subscribe: %s", exc)
+    # # Manually subscribe now (in case connection was established before callbacks were set)
+    # try:
+    #     topic = f"{processor.building}/{processor.floor}/{processor.zone}/delivery_request"
+    #     processor.client.subscribe(topic, qos=1)
+    #     logger.info("Subscribed to '%s'", topic)
+    # except Exception as exc:
+    #     logger.error("Failed to subscribe: %s", exc)
 
     logger.info("Actuator listener active (running in loop_start background thread)")
 

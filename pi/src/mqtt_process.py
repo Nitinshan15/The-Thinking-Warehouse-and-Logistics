@@ -110,7 +110,7 @@ class MQTTProcessor:
             hum = data.get("humidity_pct") if isinstance(data, dict) else None
             if temp is not None:
                 topic_t = f"{building}/{self.floor}/{zone}/temperature"
-                self.publish(topic_t, {"temperature_c": temp, "threshold": data.get("temperature_threshold"), "timestamp": timestamp})
+                self.publish(topic_t, {"temperature_c": temp, "temphigh_threshold": data.get("temphigh_threshold"), "templow_threshold": data.get("templow_threshold"), "timestamp": timestamp})
             if hum is not None:
                 topic_h = f"{building}/{self.floor}/{zone}/humidity"
                 self.publish(topic_h, {"humidity_pct": hum, "threshold": data.get("humidity_threshold"), "timestamp": timestamp})

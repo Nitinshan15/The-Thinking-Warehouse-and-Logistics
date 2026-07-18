@@ -28,7 +28,7 @@ from plugwise_control import PlugwiseController
 from mqtt_process import MQTTProcessor, load_mqtt_config
 
 import RPi.GPIO as GPIO
-
+from grovepi import *
 
 
 PORT = "/dev/ttyUSB0"
@@ -53,6 +53,8 @@ servo2_pwm = GPIO.PWM(40, 50)  # guide motor
 servo1_pwm.start(0)
 servo2_pwm.start(0)
 
+PIN_LED = 2  # GPIO pin for the light relay
+pinMode(PIN_LED, "OUTPUT")  # Set the pin mode for the light relay
 
 logging.basicConfig(
     level=logging.INFO,
@@ -197,24 +199,35 @@ def _handle_actions_request(payload_str: str):
         for action in actions_list:
             
             # --- FAN CONTROLS ---
-            if "turn-on-fan" in action:
+            if "turn-fan-on" in action:
                 print("[*] Target found: Fan -> Command: ON")
                 controller.turn_on(MAC_FAN)
-                
+            
+            elif "turn-fan-off" in action:
+                print("[*] Target found: Fan -> Command: OFF")
+                controller.turn_off(MAC_FAN)
+
             else:
                 print("[*] Target found: Fan -> Command: OFF")
                 controller.turn_off(MAC_FAN)
                 
             # --- HUMIDIFIER CONTROLS ---
-            if "turn-on-humidifier" in action:
+            if "humidifier-turn-on" in action:
                 print("[*] Target found: Humidifier -> Command: ON")
                 controller.turn_on(MAC_HUMIDIFIER)
-                
+
             else:
                 print("[*] Target found: Humidifier -> Command: OFF")
                 controller.turn_off(MAC_HUMIDIFIER)
-                
-                
+            
+            if "lights-on" in action:
+                print("[*] Target found: Light -> Command: ON")
+                digitalWrite(PIN_LED, GPIO.HIGH)
+            else:
+                print("[*] Target found: Light -> Command: OFF")
+                digitalWrite(PIN_LED, GPIO.LOW)
+
+
     except Exception as e:
         print(f"[-] Failed to process MQTT command action: {e}")
 
