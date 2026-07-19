@@ -1,30 +1,28 @@
+# Complete Smart Warehouse UI
+# Replace your current GUI source with this file.
+
+import json
 import logging
 import os
 import re
+import queue
 import sys
 import time
-import json
-import queue
-import shutil
-import subprocess
 import urllib.parse
 import urllib.request
-from enum import Enum
-from typing import Dict, Any, Tuple, List
+from typing import Any, Dict, List, Tuple
 import tkinter as tk
-from tkinter import messagebox, ttk, simpledialog  # Added simpledialog for simulated inputs
-import random
+from tkinter import messagebox, ttk
 
-# --- Graphing Libraries ---
-import matplotlib.pyplot as plt
+from pathlib import Path
+
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-# --- External Libraries Placeholder Notification ---
-import paho.mqtt.client as mqtt
-
-import smtplib
-from email.mime.text import MIMEText
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    mqtt = None
 
 try:
     from unified_planning.io import PDDLReader
@@ -33,1194 +31,789 @@ except ImportError:
     PDDLReader = None
     OneshotPlanner = None
 
-init_conditions_prev=[]
-goal_conditions_prev=[]
-
-# --- Email Alert Configuration (SMTP) ---
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER")
-SMTP_PASS = os.environ.get("SMTP_PASS")
-
-# Create output directory for logs
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-LOG_FILE = os.path.join(OUTPUT_DIR, "warehouse.log")
 
-# Configure clean logging format for hardware execution to both console and file
+run_timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+LOG_FILE = os.path.join(
+    OUTPUT_DIR,
+    f"warehouse_{run_timestamp}.log",
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
+        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
 )
+
 logger = logging.getLogger("WarehouseHardwareInterface")
+
+init_conditions_prev: list[str] = []
+goal_conditions_prev: list[str] = []
 
 
 class InventoryManager:
-    """Handles core repository logic for warehouse inventory items via a persistent JSON database file."""
     def __init__(self, filename: str = "inventory.json"):
         self.filename = filename
         self._stock: Dict[str, Dict[str, Any]] = {}
         self._load_from_json()
 
-    def _load_from_json(self):
-        """Loads repository tracking map data from a JSON file, initializing if missing."""
+    def _load_from_json(self) -> None:
         if not os.path.exists(self.filename):
-            self._stock = {
-                "INV-001": {"name": "Standard Warehouse Units", "qty": 500, "min_threshold": 20}
-            }
+            self._stock = {"INV-001": {"name": "Standard Warehouse Units", "qty": 500, "min_threshold": 20}}
             self._save_to_json()
-        else:
-            try:
-                with open(self.filename, 'r') as f:
-                    self._stock = json.load(f)
-            except Exception as e:
-                logger.error(f"Error loading JSON file, initializing blank schema: {e}")
-                self._stock = {}
-
-    def _save_to_json(self):
-        """Saves current memory stock values safely out to persistent disk files."""
+            return
         try:
-            with open(self.filename, 'w') as f:
-                json.dump(self._stock, f, indent=4)
-        except Exception as e:
-            logger.error(f"Failed writing dynamic inventory to storage format: {e}")
+            with open(self.filename, "r", encoding="utf-8") as file:
+                self._stock = json.load(file)
+        except Exception as exc:
+            logger.error("Inventory load failed: %s", exc)
+            self._stock = {}
+
+    def _save_to_json(self) -> None:
+        try:
+            with open(self.filename, "w", encoding="utf-8") as file:
+                json.dump(self._stock, file, indent=4)
+        except Exception as exc:
+            logger.error("Inventory save failed: %s", exc)
 
     def get_all_items(self) -> Dict[str, Dict[str, Any]]:
         return self._stock
 
     def update_stock(self, item_id: str, change: int) -> Tuple[bool, str]:
         if item_id not in self._stock:
-            return False, "Item ID not found."
-        
+            return False, "Item ID not found"
         new_qty = self._stock[item_id]["qty"] + change
         if new_qty < 0:
             return False, "INSUFFICIENT_STOCK"
-        
         self._stock[item_id]["qty"] = new_qty
         self._save_to_json()
-        
         if new_qty <= self._stock[item_id]["min_threshold"]:
-            return True, f"LOW_STOCK_WARNING: {self._stock[item_id]['name']}"
-        
+            return True, "LOW_STOCK_WARNING"
         return True, "Success"
 
 
 class SmartWarehouseInterfaceGUI:
-    """
-    Tkinter GUI Interface integrated with hardware Raspberry Pi interactions,
-    MQTT hierarchies, and dynamic Inventory Management features.
-    """
-
-    def __init__(self, root: tk.Tk, pin_mappings: Dict[str, int] = None):
+    def __init__(self, root: tk.Tk, pin_mappings: Dict[str, int] | None = None):
         self.root = root
-        self.root.title("Smart Warehouse Hardware Control Panel")
-        self.root.geometry("850x760")  
+        self.root.title("Smart Warehouse Control Panel")
+        self.root.geometry("1050x780")
+        self.root.minsize(900, 700)
         self.root.resizable(True, True)
 
-        # Style customization for a cleaner layout look
         self.style = ttk.Style()
-        self.style.theme_use('clam')
-        self.style.configure(".", font=("Helvetica", 10))
-        self.style.configure("TLabelframe.Label", font=("Helvetica", 10, "bold"), foreground="#2c3e50")
-        self.style.configure("Accent.TButton", font=("Helvetica", 10, "bold"), foreground="white", background="#2980b9")
-        self.style.map("Accent.TButton", background=[('active', '#3498db'), ('disabled', '#bdc3c7')], foreground=[('disabled', '#7f8c8d')])
-
-        # Dynamic State Variables
         self.night_mode = False
         self.weather_simulated = False
-
-        # Initialize Core Managers and History Data Lists for Graphs
         self.inventory_mgr = InventoryManager()
         self.history_limit = 20
         self.temp_history: List[float] = []
         self.humid_history: List[float] = []
         self.time_history: List[str] = []
-        
-        # Unified tracking properties
         self.delivery_count = 0
         self.is_waiting_for_mqtt = False
-        self.active_destination = "None"
-
-        self.alert_email_recipient = "operator@warehouse.com"
+        self.active_destination: str | None = None
         self.base_topic = "building1/floor0/zone1"
-
         self.latest_sensors: Dict[str, Dict[str, Any]] = {}
         self._pending_deliveries: Dict[str, str] = {}
         self._last_product_present = None
-        self._gui_event_queue: "queue.Queue[Tuple[callable, Tuple[Any, ...], Dict[str, Any]]]" = queue.Queue()
+        self._gui_event_queue: queue.Queue = queue.Queue()
+        self.mqtt_client = None
+        self.mqtt_connected = False
+        self.log_visible = True
 
-        # # Hardware Map Configuration (BCM Pinout Numbering)
-        # self.pins = pin_mappings or {
-        #     "light1": 3, "fan1": 4, "humid1": 5,
-        #     "motor_dir": 7, "motor_step": 8,
-        #     "motion_sensor": 17,   
-        #     "light_sensor_ch": 0,  
-        #     "sound_sensor_ch": 1   
-        # }
-        
-        # self.motor_is_running = False
-        self._initial_problem_run = False
-        
-        # Build UI Elements
         self._setup_ui()
         self.root.after(0, self._drain_gui_queue)
         self._init_mqtt()
         self._run_initial_problem_if_available()
-        
-        # Start background loops
+        self._fetch_weather_service()
         self._refresh_telemetry_loop()
-        self._fetch_weather_service() 
-        self._sync_inventory_to_mqtt()
         
-        logger.info("Smart Warehouse Interface initialized.")
+        self._sync_inventory_to_mqtt()
+        logger.info("Smart Warehouse interface initialized")
 
-    def _init_mqtt(self):
-        self.mqtt_client = None
-        self.mqtt_connected = False
+    def _configure_ui_style(self) -> None:
+        self.colors = {"bg": "#F5F7FA", "surface": "#FFFFFF", "surface_alt": "#EEF3F8", "text": "#172033", "muted": "#667085", "primary": "#1479B8", "primary_hover": "#0E639A", "success": "#16865B", "danger": "#C33B3B", "log_bg": "#152334", "log_fg": "#DDE8F2"}
+        self.root.configure(bg=self.colors["bg"])
+        self.style.theme_use("clam")
+        self.style.configure(".", font=("Segoe UI", 10), background=self.colors["bg"], foreground=self.colors["text"])
+        self.style.configure("TFrame", background=self.colors["bg"])
+        self.style.configure("Card.TFrame", background=self.colors["surface"], relief="solid", borderwidth=1)
+        self.style.configure("Section.TLabelframe", background=self.colors["bg"], borderwidth=1, relief="solid")
+        self.style.configure("Section.TLabelframe.Label", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI Semibold", 10))
+        self.style.configure("Title.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI Semibold", 18))
+        self.style.configure("Subtitle.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 9))
+        self.style.configure("CardTitle.TLabel", background=self.colors["surface"], foreground=self.colors["muted"], font=("Segoe UI", 9))
+        self.style.configure("CardValue.TLabel", background=self.colors["surface"], foreground=self.colors["text"], font=("Segoe UI Semibold", 13))
+        self.style.configure("Status.TLabel", background=self.colors["surface_alt"], foreground=self.colors["primary"], font=("Segoe UI Semibold", 10), padding=(12, 7))
+        self.style.configure("Primary.TButton", font=("Segoe UI Semibold", 10), foreground="white", background=self.colors["primary"], padding=(12, 10), borderwidth=0)
+        self.style.map("Primary.TButton", background=[("active", self.colors["primary_hover"]), ("disabled", "#A9B8C5")])
+        self.style.configure("Secondary.TButton", font=("Segoe UI Semibold", 10), foreground=self.colors["text"], background=self.colors["surface_alt"], padding=(12, 9), borderwidth=1)
+        self.style.configure("Danger.TButton", font=("Segoe UI Semibold", 10), foreground="white", background=self.colors["danger"], padding=(12, 9), borderwidth=0)
+        self.style.configure("TNotebook.Tab", padding=(14, 9), font=("Segoe UI Semibold", 10), background="#E7ECF2", foreground=self.colors["muted"])
+        self.style.map("TNotebook.Tab", background=[("selected", self.colors["surface"])], foreground=[("selected", self.colors["primary"])])
+        self.style.configure("Treeview", rowheight=30, font=("Segoe UI", 10), background=self.colors["surface"], fieldbackground=self.colors["surface"])
+        self.style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10), background=self.colors["surface_alt"], foreground=self.colors["text"])
 
-        if not mqtt:
-            logger.warning("paho-mqtt not installed. Running in localized MQTT simulation mode.")
+    def _telemetry_card(self, parent, row: int, column: int, title: str, initial: str = "—") -> ttk.Label:
+        card = ttk.Frame(parent, style="Card.TFrame", padding=(14, 11))
+        card.grid(row=row, column=column, sticky="nsew", padx=5, pady=5)
+        ttk.Label(card, text=title.upper(), style="CardTitle.TLabel").pack(anchor="w")
+        value = ttk.Label(card, text=initial, style="CardValue.TLabel")
+        value.pack(anchor="w", pady=(5, 0))
+        return value
+
+    def _setup_ui(self) -> None:
+        self._configure_ui_style()
+        main = ttk.Frame(self.root, padding=(16, 14))
+        main.pack(fill="both", expand=True)
+        header = ttk.Frame(main)
+        header.pack(fill="x", pady=(0, 12))
+        left = ttk.Frame(header)
+        left.pack(side="left", fill="x", expand=True)
+        ttk.Label(left, text="Smart Warehouse", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(left, text="Operations, telemetry, inventory, and delivery control", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
+        self.lbl_connection = ttk.Label(header, text="● MQTT connecting", style="Status.TLabel")
+        self.lbl_connection.pack(side="right", anchor="n")
+
+        notebook = ttk.Notebook(main)
+        notebook.pack(fill="both", expand=True)
+        tab_operations = ttk.Frame(notebook, padding=(4, 10, 4, 4))
+        tab_graphs = ttk.Frame(notebook, padding=(4, 10, 4, 4))
+        tab_inventory = ttk.Frame(notebook, padding=(4, 10, 4, 4))
+        notebook.add(tab_operations, text="Operations")
+        notebook.add(tab_graphs, text="Analytics")
+        notebook.add(tab_inventory, text="Inventory")
+
+        telemetry = ttk.LabelFrame(tab_operations, text=" Live telemetry ", style="Section.TLabelframe", padding=10)
+        telemetry.pack(fill="x", padx=4, pady=(0, 10))
+        for col in range(3): telemetry.columnconfigure(col, weight=1)
+        self.lbl_motion = self._telemetry_card(telemetry, 0, 0, "Motion detection", "CLEAR")
+        self.lbl_light = self._telemetry_card(telemetry, 0, 1, "Ambient light", "Unknown")
+        self.lbl_sound = self._telemetry_card(telemetry, 0, 2, "Sound level", "Unknown")
+        self.lbl_temp = self._telemetry_card(telemetry, 1, 0, "Indoor temperature", "0 °C")
+        self.lbl_humidity = self._telemetry_card(telemetry, 1, 1, "Indoor humidity", "0%")
+        self.lbl_product = self._telemetry_card(telemetry, 1, 2, "Product detection", "—")
+
+        lower = ttk.Frame(tab_operations)
+        lower.pack(fill="both", expand=True, padx=4)
+        lower.columnconfigure(0, weight=3); lower.columnconfigure(1, weight=2); lower.rowconfigure(0, weight=1)
+        dispatch = ttk.LabelFrame(lower, text=" Dispatch control ", style="Section.TLabelframe", padding=14)
+        dispatch.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        ttk.Label(dispatch, text="Select the destination for the detected item.", style="Subtitle.TLabel").pack(anchor="w")
+        status_card = ttk.Frame(dispatch, style="Card.TFrame", padding=10)
+        status_card.pack(fill="x", pady=(12, 12))
+        self.lbl_dispatch_status = ttk.Label(status_card, text="Ready for a delivery request", style="Status.TLabel")
+        self.lbl_dispatch_status.pack(fill="x")
+        button_row = ttk.Frame(dispatch); button_row.pack(fill="x"); button_row.columnconfigure(0, weight=1); button_row.columnconfigure(1, weight=1)
+        self.btn_left_100 = ttk.Button(button_row, text="Deliver to Frankfurt", style="Primary.TButton", command=lambda: self._execute_delivery("Frankfurt", "deliver_left"))
+        self.btn_left_100.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self.btn_right_100 = ttk.Button(button_row, text="Deliver to Stuttgart", style="Primary.TButton", command=lambda: self._execute_delivery("Stuttgart", "deliver_right"))
+        self.btn_right_100.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        ttk.Label(dispatch, text="The buttons stay locked until delivery is confirmed.", style="Subtitle.TLabel").pack(anchor="w", pady=(12, 0))
+
+        right = ttk.Frame(lower); right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        weather = ttk.LabelFrame(right, text=" Outdoor weather ", style="Section.TLabelframe", padding=12)
+        weather.pack(fill="x", pady=(0, 10))
+        self.lbl_weather = ttk.Label(weather, text="Loading weather data…", style="CardValue.TLabel")
+        self.lbl_weather.pack(anchor="w", pady=(0, 10))
+        self.var_sim_mode = tk.BooleanVar(value=False)
+        self.chk_sim_mode = ttk.Checkbutton(weather, text="Use simulated weather", variable=self.var_sim_mode, command=self._on_weather_mode_toggle)
+        self.chk_sim_mode.pack(anchor="w", pady=(0, 8))
+        inputs = ttk.Frame(weather); inputs.pack(fill="x"); inputs.columnconfigure(1, weight=1)
+        
+        ttk.Label(inputs, text="Temperature (°C)").grid(row=0, column=0, sticky="w", pady=4)
+
+        self.ent_temp_sim = ttk.Entry(inputs, width=10)
+        self.ent_temp_sim.insert(0, "22")
+        self.ent_temp_sim.grid(
+            row=0, column=1, sticky="ew", padx=(10, 0), pady=4
+        )
+
+        ttk.Label(inputs, text="Humidity (%)").grid(row=1, column=0, sticky="w", pady=4)
+
+        self.ent_humidity_sim = ttk.Entry(inputs, width=10)
+        self.ent_humidity_sim.insert(0, "45")
+        self.ent_humidity_sim.grid(
+            row=1, column=1, sticky="ew", padx=(10, 0), pady=4
+        )
+
+        self.var_rain_sim = tk.BooleanVar(value=False)
+
+        self.chk_rain_sim = ttk.Checkbutton(weather, text="Raining", variable=self.var_rain_sim); self.chk_rain_sim.pack(anchor="w", pady=(7, 0))
+        for widget in (self.ent_temp_sim, self.ent_humidity_sim, self.chk_rain_sim): widget.config(state="disabled")
+        operator = ttk.LabelFrame(right, text=" Operator controls ", style="Section.TLabelframe", padding=12); operator.pack(fill="x")
+        self.btn_night = ttk.Button(operator, text="Enable night mode", style="Secondary.TButton", command=self._toggle_night_mode); self.btn_night.pack(fill="x", pady=(0, 7))
+        self.btn_toggle_log = ttk.Button(operator, text="Hide activity log", style="Secondary.TButton", command=self._toggle_log_panel); self.btn_toggle_log.pack(fill="x", pady=7)
+        ttk.Button(operator, text="Exit control panel", style="Danger.TButton", command=self.root.quit).pack(fill="x", pady=(7, 0))
+
+        graph_frame = ttk.LabelFrame(tab_graphs, text=" Environmental trends ", style="Section.TLabelframe", padding=12)
+        graph_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        self.fig = Figure(figsize=(7.5, 5.2), dpi=100); self.fig.patch.set_facecolor("#FFFFFF")
+        self.ax_temp = self.fig.add_subplot(211); self.ax_humid = self.fig.add_subplot(212)
+        for axis in (self.ax_temp, self.ax_humid): axis.set_facecolor("#FFFFFF"); axis.grid(True, linestyle="--", alpha=0.28)
+        self.ax_temp.set_title("Temperature (°C)", loc="left", fontsize=11); self.ax_humid.set_title("Humidity (%)", loc="left", fontsize=11)
+        self.fig.tight_layout(pad=2.4)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame); self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        inv_frame = ttk.LabelFrame(tab_inventory, text=" Current stock ", style="Section.TLabelframe", padding=12); inv_frame.pack(fill="both", expand=True, padx=4, pady=(4, 10))
+        self.inv_tree = ttk.Treeview(inv_frame, columns=("ID", "Name", "Qty", "Min"), show="headings", height=12)
+        for key, title, width, anchor in (("ID", "Item ID", 120, "center"), ("Name", "Description", 430, "w"), ("Qty", "Available", 110, "center"), ("Min", "Minimum", 110, "center")):
+            self.inv_tree.heading(key, text=title); self.inv_tree.column(key, width=width, anchor=anchor)
+        scroll = ttk.Scrollbar(inv_frame, orient="vertical", command=self.inv_tree.yview); self.inv_tree.configure(yscrollcommand=scroll.set)
+        self.inv_tree.pack(side="left", fill="both", expand=True); scroll.pack(side="right", fill="y"); self._populate_inventory_tree()
+        actions = ttk.LabelFrame(tab_inventory, text=" Stock adjustment ", style="Section.TLabelframe", padding=12); actions.pack(fill="x", padx=4, pady=(0, 4))
+        ttk.Label(actions, text="Quantity").pack(side="left")
+        self.ent_qty_change = ttk.Entry(actions, width=8); self.ent_qty_change.insert(0, "10"); self.ent_qty_change.pack(side="left", padx=8)
+        ttk.Button(actions, text="Restock selected", style="Primary.TButton", command=lambda: self._handle_stock_adjust(1)).pack(side="left", padx=(4, 6))
+        ttk.Button(actions, text="Dispatch selected", style="Secondary.TButton", command=lambda: self._handle_stock_adjust(-1)).pack(side="left")
+
+        self.log_frame = ttk.LabelFrame(main, text=" Activity log ", style="Section.TLabelframe", padding=8); self.log_frame.pack(fill="both", expand=False, pady=(10, 0))
+        self.log_box = tk.Text(self.log_frame, height=14, state="disabled", wrap="word", background=self.colors["log_bg"], foreground=self.colors["log_fg"], insertbackground="white", relief="flat", font=("Cascadia Mono", 9), padx=10, pady=8)
+        self.log_box.pack(side="left", fill="both", expand=True)
+        log_scroll = ttk.Scrollbar(self.log_frame, command=self.log_box.yview); log_scroll.pack(side="right", fill="y"); self.log_box.configure(yscrollcommand=log_scroll.set)
+
+
+    # -------------------- PDDL planner integration --------------------
+    def actions_mqtt_publish(self, payload: str) -> None:
+        self._publish_mqtt("actions", payload)
+        self._log_to_gui(f"[MQTT PUB] actions → {payload}")
+
+    def _pddl_dir(self) -> str:
+        return os.environ.get(
+            "PDDL_DIR",
+            os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pddl")),
+        )
+
+    def run_planner(self, domain_path: str, problem_path: str) -> None:
+        if not os.path.exists(domain_path):
+            self._log_to_gui(f"[PLANNER] Domain file not found: {domain_path}")
             return
-
-        self.mqtt_host = "192.168.0.199"
-        self.mqtt_port = 1883
-
-        client = mqtt.Client(client_id="Warehouse1GUI")
-        client.on_connect = self._on_mqtt_connect
-        client.on_message = self._on_mqtt_message
-        client.on_disconnect = self._on_mqtt_disconnect
-
+        if not os.path.exists(problem_path):
+            self._log_to_gui(f"[PLANNER] Problem file not found: {problem_path}")
+            return
+        if PDDLReader is None or OneshotPlanner is None:
+            self._log_to_gui("[PLANNER] Unified Planning is unavailable. Install unified-planning and Fast Downward.")
+            return
+        self._log_to_gui(f"[PLANNER] Solving {os.path.basename(problem_path)} with Fast Downward.")
         try:
-            client.connect(self.mqtt_host, self.mqtt_port)
-            client.loop_start()  
-            self.mqtt_client = client
-        except Exception as e:
-            logger.error(f"Cannot connect to MQTT broker {self.mqtt_host}:{self.mqtt_port} — {e}")
-            self.mqtt_client = None
+            problem = PDDLReader().parse_problem(domain_path, problem_path)
+            with OneshotPlanner(name="fast-downward") as planner:
+                result = planner.solve(problem)
+            plan_path = os.path.join(os.path.dirname(problem_path), f"plan_{os.path.basename(problem_path)}.txt")
+            status = getattr(getattr(result, "status", None), "name", "UNKNOWN")
+            if status in {"SOLVED_SATISFICING", "SOLVED_OPTIMALLY"}:
+                actions = [str(action) for action in getattr(getattr(result, "plan", None), "actions", [])]
+                plan_text = "\n".join(actions) if actions else "No actions generated."
+                Path(plan_path).write_text(plan_text, encoding="utf-8")
+                for action in actions:
+                    self._log_to_gui(f"[PLANNER] {action}")
+                self.actions_mqtt_publish(plan_text)
+                self._log_to_gui(f"[PLANNER] Plan saved: {plan_path}")
+            else:
+                Path(plan_path).write_text("No plan found.", encoding="utf-8")
+                self._log_to_gui(f"[PLANNER] No plan found ({status}).")
+        except Exception as exc:
+            self._log_to_gui(f"[PLANNER] Error: {exc}")
 
-    def _enqueue_gui_task(self, callback, *args, **kwargs):
-        self._gui_event_queue.put((callback, args, kwargs))
+    def _run_initial_problem_if_available(self) -> None:
+        pddl_dir = self._pddl_dir()
+        domain_path = os.path.join(pddl_dir, "domain.pddl")
+        problem_path = os.path.join(pddl_dir, "problem_1.pddl")
+        if os.path.exists(domain_path) and os.path.exists(problem_path):
+            self._log_to_gui("[PLANNER] Startup problem detected; running problem_1.pddl.")
+            self.run_planner(domain_path, problem_path)
+        else:
+            self._log_to_gui("[PLANNER] Startup domain/problem not found; waiting for live telemetry.")
 
-    def _drain_gui_queue(self):
-        while not self._gui_event_queue.empty():
-            callback, args, kwargs = self._gui_event_queue.get_nowait()
-            try:
-                callback(*args, **kwargs)
-            except Exception as exc:
-                logger.exception("GUI queue callback failed: %s", exc)
-        self.root.after(50, self._drain_gui_queue)
+    def generate_pddl_problem(self, init_conditions: List[str], goal_conditions: List[str], zones, item_name: str) -> str | None:
+        pddl_dir = self._pddl_dir()
+        os.makedirs(pddl_dir, exist_ok=True)
+        domain_path = os.path.join(pddl_dir, "domain.pddl")
+        if not os.path.exists(domain_path):
+            self._log_to_gui(f"[PLANNER] Domain file not found: {domain_path}")
+            return None
+        domain_text = Path(domain_path).read_text(encoding="utf-8")
+        match = re.search(r"\(define\s*\(domain\s+([^\s\)]+)\)", domain_text)
+        domain_name = match.group(1) if match else "smart-zone-control"
+        numbers = [int(m.group(1)) for name in os.listdir(pddl_dir) if (m := re.fullmatch(r"problem_(\d+)\.pddl", name))]
+        number = max(numbers, default=0) + 1
+        zone_list = sorted(set(zones)) or ["zone1"]
+        conditions = list(dict.fromkeys(init_conditions))
+        for zone in reversed(zone_list):
+            fact = f"(zone-in-building {zone} building1)"
+            if fact not in conditions:
+                conditions.insert(0, fact)
+        if not goal_conditions:
+            self._log_to_gui("[PLANNER] No goals generated; PDDL problem skipped.")
+            return None
+        objects = "\n    ".join(f"{zone} - zone" for zone in zone_list)
+        init_text = "\n    ".join(conditions)
+        goal_text = "\n      ".join(dict.fromkeys(goal_conditions))
+        problem_text = f""";; Auto-generated from live warehouse telemetry
+(define (problem problem_{number})
+  (:domain {domain_name})
 
-    def _on_mqtt_connect(self, client, userdata, *args):
-        flags = 0
-        rc = 0
-        properties = None
+  (:objects
+    building1 - building
+    {objects}
+    {item_name or "item1"} - item
+  )
 
-        if len(args) >= 3:
-            flags, rc, properties = args[0], args[1], args[2]
-        elif len(args) == 2:
-            flags, rc = args[0], args[1]
-        elif len(args) == 1:
-            rc = args[0]
+  (:init
+    {init_text}
+  )
 
+  (:goal
+    (and
+      {goal_text}
+    )
+  )
+)
+"""
+        problem_path = os.path.join(pddl_dir, f"problem_{number}.pddl")
+        Path(problem_path).write_text(problem_text, encoding="utf-8")
+        self._log_to_gui(f"[PLANNER] Generated {os.path.basename(problem_path)}.")
+        self.run_planner(domain_path, problem_path)
+        return problem_path
+
+    def aiplanner(self, temperature, humidity, light, sound, motion, product, ultrasonic, delivery_request, weather_outdoor,fanstatus,windowstatus,heaterstatus) -> None:
+        global init_conditions_prev, goal_conditions_prev
+        init_conditions: List[str] = []
+        goal_conditions: List[str] = []
+        zones = set()
+        item_name = f"item_INV-001_{self.delivery_count + 1}"
+        if isinstance(delivery_request, dict):
+            item_name = f"item_{delivery_request.get('transaction_id', '1')}"
+
+        def get_zone(payload, default="zone1"):
+            return payload.get("zone", default) if isinstance(payload, dict) else default
+
+        if isinstance(motion, dict):        
+            if motion.get("value"):
+                zone = get_zone(motion)
+                zones.add(zone)
+                init_conditions.append(f"(motion-detected {zone})")
+        else:
+            logger.warning("Motion data is not a dict or missing 'value': %s", motion)
+
+        if isinstance(light, dict) and light.get("raw") is not None:
+            zone = get_zone(light)
+            zones.add(zone)
+            raw_light = light.get("raw", 0)
+            low_thresh_light = light.get("lightlow_threshold", 0)
+            high_thresh_light = light.get("lighthigh_threshold", float("inf"))
+            
+            if(raw_light >= high_thresh_light):
+                init_conditions.append(f"(light-high {zone})")
+
+            elif(raw_light >= low_thresh_light and raw_light < high_thresh_light):
+                init_conditions.append(f"(light-normal {zone})")
+
+            else:
+                init_conditions.append(f"(light-low {zone})")
+
+            goal_conditions.append(f"(control-lights {zone})")
+
+        else:
+            logger.warning("Light data is not a dict or missing 'raw': %s", light)
+
+        if isinstance(temperature, dict) and temperature.get("temperature_c") is not None:
+            zone = get_zone(temperature)
+            zones.add(zone)
+            temp_current = temperature.get("temperature_c")
+            temp_low = temperature.get("templow_threshold", 18)
+            high = temperature.get("temphigh_threshold", 26)
+
+            if temp_current >= high:
+                init_conditions.append(f"(indoor-temp-hot {zone})")
+            elif temp_current < temp_low:
+                init_conditions.append(f"(indoor-temp-cold {zone})")
+            else:
+
+                init_conditions.append(f"(indoor-temp-ideal {zone})")
+            goal_conditions.append(f"(comfortable {zone})")
+
+        else:
+            logger.warning("Temperature data is not a dict or missing 'temperature_c': %s", temperature)
+
+        if isinstance(humidity, dict):
+            zone = get_zone(humidity)
+            zones.add(zone)
+            humidity_value = humidity.get("humidity_pct")
+            threshold = humidity.get("threshold", 40)
+
+            if humidity_value is not None:
+                if humidity_value <= threshold:
+                    init_conditions.append(f"(humidity-low {zone})")
+
+                goal_conditions.append(f"(control-humidity {zone})")
+        else:
+            logger.warning("Humidity data is not a dict or missing 'humidity_pct': %s", humidity)
+
+        #print("Weather outdoor:", weather_outdoor)
+        if isinstance(weather_outdoor, dict):
+            temp = weather_outdoor.get("temperature_c")
+            if temp is not None: 
+                if temp>=30:
+                    init_conditions.append("(outdoor-temp-hot)")
+                else:
+                    init_conditions.append("(outdoor-temp-cold)")
+            
+            if weather_outdoor.get("description") == "Raining": 
+                init_conditions.append("(outdoor-raining)")
+
+        else:
+            logger.warning("Weather outdoor data is not a dict: %s", weather_outdoor)
+
+        if isinstance(delivery_request, dict):
+            zone = get_zone(delivery_request); zones.add(zone)
+            command = delivery_request.get("command")
+            if command == "deliver_left": init_conditions.append(f"(delivery-requested-left {item_name} {zone})")
+            elif command == "deliver_right": init_conditions.append(f"(delivery-requested-right {item_name} {zone})")
+            else: logger.warning("Invalid delivery request command: %s", command); return
+            present = False
+            if isinstance(ultrasonic, dict):
+                raw, threshold = ultrasonic.get("raw"), ultrasonic.get("threshold")
+                
+                if raw is not None:
+                    if raw <= threshold:
+                        present = True
+                    else:
+                        present = False
+                else:
+                    logger.warning("Ultrasonic data is not a dict or missing 'raw': %s", ultrasonic)
+
+            elif isinstance(product, dict): present = bool(product.get("present"))
+            if present: init_conditions.append(f"(product-available {item_name} {zone})")
+            goal_conditions.append(f"(delivery-request-handled {item_name} {zone})")
+
+
+        if isinstance(fanstatus, dict):
+            zone = get_zone(fanstatus)
+            zones.add(zone)
+            if fanstatus.get("status") == "on": init_conditions.append(f"(fan-on {zone})")
+            else: init_conditions.append(f"(fan-off {zone})")
+
+        else:
+            init_conditions.append(f"(fan-off zone1)")
+            #logger.warning("Fan status data is not a dict: %s", fanstatus)
+
+        if isinstance(windowstatus, dict):
+            zone = get_zone(windowstatus); zones.add(zone)
+            if windowstatus.get("status") == "open": init_conditions.append(f"(window-open {zone})")
+            else: init_conditions.append(f"(window-closed {zone})")
+        else:
+            init_conditions.append(f"(window-closed zone1)")
+            logger.warning("Window status data is not a dict: %s", windowstatus)   
+
+        if isinstance(heaterstatus, dict):
+            zone = get_zone(heaterstatus); zones.add(zone)
+            if heaterstatus.get("status") == "on":
+                init_conditions.append(f"(heater-on {zone})")
+            else: 
+                init_conditions.append(f"(heater-off {zone})")
+        else:
+            init_conditions.append(f"(heater-off zone1)")
+            logger.warning("Heater status data is not a dict: %s", heaterstatus)
+
+
+        init_conditions = list(dict.fromkeys(init_conditions)); goal_conditions = list(dict.fromkeys(goal_conditions))
+        if (init_conditions, goal_conditions) != (init_conditions_prev, goal_conditions_prev):
+            init_conditions_prev, goal_conditions_prev = init_conditions, goal_conditions
+            self._log_to_gui(f"[PLANNER] Init: {init_conditions}")
+            self._log_to_gui(f"[PLANNER] Goals: {goal_conditions}")
+            self.generate_pddl_problem(init_conditions, goal_conditions, zones, item_name)
+
+    def _toggle_log_panel(self) -> None:
+        if self.log_visible:
+            self.log_frame.pack_forget()
+            self.btn_toggle_log.config(text="Show activity log")
+        else:
+            self.log_frame.pack(fill="both", expand=False, pady=(10, 0))
+            self.btn_toggle_log.config(text="Hide activity log")
+
+        self.log_visible = not self.log_visible
+
+    def _init_mqtt(self) -> None:
+        if mqtt is None:
+            self.lbl_connection.config(text="● MQTT simulation", foreground=self.colors["muted"]); self._log_to_gui("[MQTT] paho-mqtt unavailable; simulation mode enabled."); return
+        host = os.environ.get("MQTT_HOST", "192.168.0.199"); port = int(os.environ.get("MQTT_PORT", "1883"))
+        try:
+            client = mqtt.Client(client_id="Warehouse1GUI")
+            client.on_connect = self._on_mqtt_connect; client.on_message = self._on_mqtt_message; client.on_disconnect = self._on_mqtt_disconnect
+            client.connect(host, port); client.loop_start(); self.mqtt_client = client
+        except Exception as exc:
+            self.lbl_connection.config(text="● MQTT offline", foreground=self.colors["danger"]); self._log_to_gui(f"[MQTT] Offline: {exc}")
+
+    def _on_mqtt_connect(self, client, userdata, flags, rc, *args) -> None:
         if rc == 0:
             self.mqtt_connected = True
-            logger.info("Connected to MQTT broker")
             client.subscribe(f"{self.base_topic}/#", qos=0)
-            # Also subscribe to delivery_ack so the Pi's confirmation is received
             client.subscribe("delivery_ack", qos=1)
-            self._enqueue_gui_task(self._log_to_gui, "[MQTT] Connected and subscribed (sensors + delivery_ack).")
+            self._enqueue_gui_task(self.lbl_connection.config, text="● MQTT connected", foreground=self.colors["success"])
+            self._enqueue_gui_task(self._log_to_gui, "[MQTT] Connected and subscribed.")
         else:
-            self.mqtt_connected = False
-            logger.error("MQTT connection failed with code %s", rc)
+            self._enqueue_gui_task(self.lbl_connection.config, text="● MQTT connection failed", foreground=self.colors["danger"])
 
-    def _on_mqtt_disconnect(self, client, userdata, *args):
-        self.mqtt_connected = False
-        rc = 0
-        if args:
-            rc = args[-1] if len(args) > 1 else args[0]
-            logger.info("MQTT disconnected with code %s", rc)
-        self._enqueue_gui_task(self._log_to_gui, "[MQTT] Disconnected from broker.")
+    def _on_mqtt_disconnect(self, client, userdata, *args) -> None:
+        self.mqtt_connected = False; self._enqueue_gui_task(self.lbl_connection.config, text="● MQTT offline", foreground=self.colors["danger"]); self._enqueue_gui_task(self._log_to_gui, "[MQTT] Disconnected.")
 
-    def _on_mqtt_message(self, client, userdata, msg):
-        payload = msg.payload.decode("utf-8", errors="replace")
-        self._enqueue_gui_task(self._handle_incoming_mqtt, msg.topic, payload)
+    def _on_mqtt_message(self, client, userdata, msg) -> None:
+        self._enqueue_gui_task(self._handle_incoming_mqtt, msg.topic, msg.payload.decode("utf-8", errors="replace"))
+
+    def _enqueue_gui_task(self, callback, *args, **kwargs) -> None:
+        self._gui_event_queue.put((callback, args, kwargs))
+
+    def _drain_gui_queue(self) -> None:
+        while not self._gui_event_queue.empty():
+            callback, args, kwargs = self._gui_event_queue.get_nowait()
+            try: callback(*args, **kwargs)
+            except Exception as exc: logger.exception("GUI callback failed: %s", exc)
+        self.root.after(50, self._drain_gui_queue)
 
     def _handle_incoming_mqtt(self, topic: str, payload: str) -> None:
-        print(f"[MQTT SUB] {topic} -> {payload}")
-        sub_topic = topic.split("/")[-1]
-
-        try:
-            data = json.loads(payload)
-        except (json.JSONDecodeError, TypeError):
-            self._log_to_gui(f"[MQTT SUB] {topic} -> {payload}")
+        try: data = json.loads(payload)
+        except (TypeError, json.JSONDecodeError): self._log_to_gui(f"[MQTT SUB] {topic} → {payload}"); return
+        if topic == "delivery_ack":
+            tx_id = data.get("transaction_id"); status = data.get("status", "")
+            if tx_id in self._pending_deliveries:
+                destination = self._pending_deliveries.pop(tx_id)
+                if status == "delivered": self._on_mqtt_delivery_success_received(tx_id, destination)
+                else: self._reset_dispatch(f"Delivery failed for {destination}")
             return
-
-        tokens = topic.split("/")
-        if len(tokens) >= 2:
-            zone = tokens[-2]
-            if isinstance(data, dict):
-                data["zone"] = zone
-
+        sub_topic = topic.split("/")[-1]
+        if isinstance(data, dict): data["zone"] = topic.split("/")[-2] if len(topic.split("/")) >= 2 else "zone1"
         self.latest_sensors[sub_topic] = data
-        self._log_to_gui(f"[MQTT SUB] {topic} -> {payload}")
-
+        #self._log_to_gui(f"[MQTT SUB] {topic} → {payload}")
         self._update_telemetry_labels()
 
-        if sub_topic == "productdetected":
-            was_present = getattr(self, "_last_product_present", None)
-            now_present = bool(data.get("present"))
-            self._last_product_present = now_present
-            if was_present and not now_present and getattr(self, "_pending_deliveries", None):
-                seq_id, destination = next(iter(self._pending_deliveries.items()))
-                self._pending_deliveries.pop(seq_id, None)
-                self._on_mqtt_delivery_success_received(seq_id, destination)
-        elif sub_topic == "Motors status":
-            guide_val = data.get("guide_motor")
-            if getattr(self, "_pending_deliveries", None):
-                seq_id, destination = next(iter(self._pending_deliveries.items()))
-                if (guide_val == "left" and destination == "Frankfurt") or \
-                   (guide_val == "right" and destination == "Stuttgart"):
-                    self._pending_deliveries.pop(seq_id, None)
-                    self._on_mqtt_delivery_success_received(seq_id, destination)
-        elif topic == "delivery_ack":
-            # Pi publishes here after the guide motor completes its movement.
-            # Match by transaction_id to confirm the correct delivery.
-            ack_tx_id  = data.get("transaction_id")
-            ack_status = data.get("status", "")          # "delivered" or "failed"
-            ack_item   = ack_tx_id.split("_")[0] if (ack_tx_id and "_" in ack_tx_id) else "unknown"
-            pending    = getattr(self, "_pending_deliveries", {})
-            if ack_tx_id and ack_tx_id in pending:
-                destination = pending.pop(ack_tx_id)
-                if ack_status == "delivered":
-                    logger.info("[DELIVERY ACK] %s confirmed delivered (item=%s)", ack_tx_id, ack_item)
-                    self._on_mqtt_delivery_success_received(ack_tx_id, destination)
-                else:
-                    fail_msg = f"[DELIVERY ACK] Pi reported FAILURE for {ack_tx_id} (item={ack_item}). Check actuator."
-                    self._log_to_gui(fail_msg)
-                    if "delivery_request" in self.latest_sensors:
-                        del self.latest_sensors["delivery_request"]
-                    # Unlock UI even on failure so operator can retry
-                    self.is_waiting_for_mqtt = False
-                    self.active_destination = "None"
-                    self.btn_left_100.config(state="normal")
-                    self.btn_right_100.config(state="normal")
-                    self.motor_frame.config(text=" Logistic Dispatch Hub (Ready) ")
-                    self._update_telemetry_labels()
-            else:
-                logger.warning("[DELIVERY ACK] Unknown transaction_id '%s' — ignoring.", ack_tx_id)
-
-    def _pending_destination_for(self, seq_id: str):
-        return getattr(self, "_pending_deliveries", {}).pop(seq_id, None)
-
-    def _publish_mqtt(self, sub_topic: str, payload: Any):
-        full_topic = f"{self.base_topic}/{sub_topic}"
-
+    def _publish_mqtt(self, sub_topic: str, payload: Any) -> None:
+        topic = f"{self.base_topic}/{sub_topic}"
         if self.mqtt_client and self.mqtt_connected:
-            try:
-                self.mqtt_client.publish(full_topic, str(payload), qos=0)
-                logger.info(f"[MQTT PUB] Topic: {full_topic} -> Payload: {payload}")
-            except Exception as e:
-                logger.error(f"[MQTT PUB] Failed to publish to {full_topic}: {e}")
-        else:
-            logger.info(f"[MQTT PUB - SIMULATED, no broker connection] Topic: {full_topic} -> Payload: {payload}")
+            try: self.mqtt_client.publish(topic, str(payload), qos=0)
+            except Exception as exc: self._log_to_gui(f"[MQTT PUB] Failed: {exc}")
+        else: logger.info("[MQTT SIM] %s → %s", topic, payload)
 
-    def _send_email_alert(self, subject: str, body: str):
-        local_msg = f"[EMAIL ALERT] Target: {self.alert_email_recipient} | Subject: {subject} | Body: {body}."
-        self._log_to_gui(local_msg)
+    def _on_weather_mode_toggle(self) -> None:
+        self.weather_simulated = self.var_sim_mode.get()
+        state = "normal" if self.weather_simulated else "disabled"
+        for widget in (self.ent_temp_sim, self.ent_humidity_sim, self.chk_rain_sim): widget.config(state=state)
+        self._log_to_gui("[SYSTEM] Simulated weather enabled." if self.weather_simulated else "[SYSTEM] Live weather enabled.")
+        self._fetch_weather_service()
 
-        if not SMTP_USER or not SMTP_PASS:
-            self._log_to_gui("[EMAIL ALERT] SMTP_USER/SMTP_PASS not set -- skipping real send.")
-            return
-
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = SMTP_USER
-        msg["To"] = self.alert_email_recipient
-
-        try:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=5) as server:
-                server.starttls()
-                server.login(SMTP_USER, SMTP_PASS)
-                server.sendmail(SMTP_USER, [self.alert_email_recipient], msg.as_string())
-            sent_msg = "[EMAIL ALERT] Sent via SMTP."
-            self._log_to_gui(sent_msg)
-        except Exception as e:
-            err_msg = f"[EMAIL ALERT] Failed to send via SMTP: {e}"
-            self._log_to_gui(err_msg)
-
-    def _describe_weather_code(self, weather_code: Any) -> str:
-        rain_codes = {51, 53, 55, 61, 63, 65, 80, 95}
-        if weather_code is None:
-            return "Unknown"
-        try:
-            code = int(weather_code)
-        except (TypeError, ValueError):
-            return "Unknown"
-        return "Raining" if code in rain_codes else "Not Raining"
+    def _describe_weather_code(self, code: Any) -> str:
+        try: return "Raining" if int(code) in {51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99} else "Clear"
+        except (TypeError, ValueError): return "Unknown"
 
     def _get_live_weather_data(self) -> Dict[str, Any]:
         city = os.environ.get("WEATHER_CITY", "Stuttgart")
-        lat = os.environ.get("WEATHER_LAT")
-        lon = os.environ.get("WEATHER_LON")
-        city_name = city
-
         try:
-            if lat and lon:
-                latitude = lat
-                longitude = lon
-            else:
-                geocode_url = (
-                    "https://geocoding-api.open-meteo.com/v1/search?"
-                    f"name={urllib.parse.quote(city)}&count=1&language=en&format=json"
-                )
-                with urllib.request.urlopen(geocode_url, timeout=8) as response:
-                    geodata = json.load(response)
-
-                if not geodata.get("results"):
-                    raise ValueError(f"No geocoding results for city {city}")
-
-                result = geodata["results"][0]
-                city_name = result.get("name", city)
-                latitude = result["latitude"]
-                longitude = result["longitude"]
-
-            forecast_url = (
-                "https://api.open-meteo.com/v1/forecast?"
-                f"latitude={latitude}&longitude={longitude}&current=temperature_2m,relative_humidity_2m,weather_code&timezone=auto"
-            )
-            with urllib.request.urlopen(forecast_url, timeout=8) as response:
-                forecast_data = json.load(response)
-
-            current = forecast_data.get("current", {})
-            weather_code = current.get("weather_code")
-            temperature_c = round(float(current.get("temperature_2m", 0.0)), 1)
-            humidity_pct = int(current.get("relative_humidity_2m", 0))
-            description = self._describe_weather_code(weather_code)
-
-            return {
-                "city": city_name,
-                "temperature_c": temperature_c,
-                "humidity_pct": humidity_pct,
-                "description": description,
-                "weather_code": weather_code,
-                "source": "Open-Meteo",
-                "display": f"{temperature_c}°C, {description}"
-            }
+            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1&language=en&format=json"
+            with urllib.request.urlopen(geo_url, timeout=8) as response: place = json.load(response)["results"][0]
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={place['latitude']}&longitude={place['longitude']}&current=temperature_2m,relative_humidity_2m,weather_code&timezone=auto"
+            with urllib.request.urlopen(url, timeout=8) as response: current = json.load(response).get("current", {})
+            return {"temperature_c": round(float(current.get("temperature_2m", 0)), 1), "humidity_pct": int(current.get("relative_humidity_2m", 0)), "description": self._describe_weather_code(current.get("weather_code"))}
         except Exception as exc:
-            logger.warning("Weather fetch failed: %s", exc)
-            return {
-                "city": city_name,
-                "temperature_c": None,
-                "humidity_pct": None,
-                "description": "Unavailable",
-                "weather_code": None,
-                "source": "Open-Meteo",
-                "display": "Unavailable"
-            }
+            logger.warning("Weather fetch failed: %s", exc); return {"temperature_c": None, "humidity_pct": None, "description": "Unavailable"}
 
     def _fetch_weather_service(self) -> None:
-        if not self.weather_simulated:
-            weather_data = self._get_live_weather_data()
-            self.latest_weather = weather_data
-            self.lbl_weather.config(text=f"Outdoor Weather: {weather_data['display']}")
-            #self._publish_mqtt("weather", json.dumps(weather_data))
-            self._publish_mqtt(
-                "Weather_Outdoor",
-                f"Temp: {weather_data['temperature_c'] if weather_data['temperature_c'] is not None else 'N/A'}, "
-                f"Humidity: {weather_data['humidity_pct'] if weather_data['humidity_pct'] is not None else 'N/A'}, "
-                f"Weather: {weather_data['description'] if weather_data['description'] is not None else 'N/A'}"
-            )
+        if self.weather_simulated:
+            try: temp = float(self.ent_temp_sim.get())
+            except ValueError: temp = None
+            try: humidity = int(self.ent_humidity_sim.get())
+            except ValueError: humidity = None
+            weather = {"temperature_c": temp, "humidity_pct": humidity, "description": "Raining" if self.var_rain_sim.get() else "Clear"}
+            source = "simulated"
+        else: weather = self._get_live_weather_data(); source = "live"
+
+        self.latest_sensors["weather_outdoor"] = weather
+        display_temp = "—" if weather["temperature_c"] is None else f"{weather['temperature_c']} °C"
+        self.lbl_weather.config(
+            text=f"{display_temp} · {weather['description']} ({source})"
+        )
+        self._publish_mqtt("weather_outdoor", json.dumps(weather))
         self.root.after(30000, self._fetch_weather_service)
 
-    def _toggle_night_mode(self):
-        """Changes the UI color theme and arms security alerts for active motion."""
+
+    def _toggle_night_mode(self) -> None:
         self.night_mode = not self.night_mode
-        if self.night_mode:
-            self.btn_night.config(text="☀️ Disable Night Mode")
-            self.style.configure(".", background="#2c3e50", foreground="#ffffff")
-            self.style.configure("TLabelframe.Label", background="#2c3e50", foreground="#ecf0f1")
-            self.root.configure(background="#2c3e50")
-            self._log_to_gui("[SYSTEM] Night Mode Enabled. Motion alerts armed.")
-        else:
-            self.btn_night.config(text="🌙 Enable Night Mode")
-            self.style.configure(".", background="#f0f0f0", foreground="#000000")
-            self.style.configure("TLabelframe.Label", background="#f0f0f0", foreground="#2c3e50")
-            self.root.configure(background="#f0f0f0")
-            self._log_to_gui("[SYSTEM] Night Mode Disabled.")
+        self.btn_night.config(text="Disable night mode" if self.night_mode else "Enable night mode")
+        self._log_to_gui("[SYSTEM] Night mode enabled." if self.night_mode else "[SYSTEM] Night mode disabled.")
 
-    def _trigger_weather_simulation(self):
-        """Prompts operator for customized real-time environmental input values."""
-        temp = simpledialog.askfloat("Simulation Config", "Enter Temperature (°C):", parent=self.root)
-        if temp is None: return
-        humid = simpledialog.askinteger("Simulation Config", "Enter Humidity Percentage (%):", parent=self.root)
-        if humid is None: return
-        desc = simpledialog.askstring("Simulation Config", "Enter Weather Status Description:", parent=self.root)
-        if desc is None: return
+    def _populate_inventory_tree(self) -> None:
+        for item in self.inv_tree.get_children(): self.inv_tree.delete(item)
+        for item_id, details in self.inventory_mgr.get_all_items().items(): self.inv_tree.insert("", tk.END, values=(item_id, details["name"], details["qty"], details["min_threshold"]))
 
-        self.weather_simulated = True
-        simulated_data = {
-            "city": "Simulated Matrix",
-            "temperature_c": temp,
-            "humidity_pct": humid,
-            "description": desc,
-            "weather_code": 0,
-            "source": "Manual Simulation Override",
-            "display": f"{temp}°C, {desc} (Simulated)"
-        }
-        self.latest_weather = simulated_data
-        self.lbl_weather.config(text=f"Outdoor Weather: {simulated_data['display']}")
-        self._publish_mqtt("Weather_Outdoor", json.dumps(simulated_data))
-        self._log_to_gui(f"[WEATHER SIM] Weather telemetry manually locked to: {simulated_data['display']}")
+    def _handle_stock_adjust(self, direction: int) -> None:
+        selection = self.inv_tree.selection()
+        if not selection: messagebox.showinfo("Select an item", "Select an inventory item first."); return
+        try: delta = int(self.ent_qty_change.get()) * direction
+        except ValueError: messagebox.showerror("Invalid quantity", "Enter a whole-number quantity."); return
+        item_id = self.inv_tree.item(selection[0])["values"][0]; success, info = self.inventory_mgr.update_stock(item_id, delta)
+        if not success: messagebox.showwarning("Inventory update", info); return
+        self._populate_inventory_tree(); self._sync_inventory_to_mqtt(); self._log_to_gui(f"[INVENTORY] {item_id}: {delta:+d} units.")
+        if info == "LOW_STOCK_WARNING": self._log_to_gui(f"[INVENTORY] Low stock warning for {item_id}.")
 
-    def _setup_ui(self) -> None:
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True, padx=12, pady=8)
-
-        tab_operations = ttk.Frame(notebook)
-        tab_graphs = ttk.Frame(notebook)
-        tab_inventory = ttk.Frame(notebook)
-
-        notebook.add(tab_operations, text="Operations & Telemetry")
-        notebook.add(tab_graphs, text="Live Analytics Dashboard")
-        notebook.add(tab_inventory, text="Inventory Dashboard")
-
-        # TAB 1: OPERATIONS & TELEMETRY
-        telemetry_frame = ttk.LabelFrame(tab_operations, text=" Warehouse Live Telemetry (MQTT Synchronized) ", padding=12)
-        telemetry_frame.pack(fill="x", padx=10, pady=6)
-
-        self.lbl_motion = ttk.Label(telemetry_frame, text="Motion Detection: --", font=("Helvetica", 10, "bold"))
-        self.lbl_motion.grid(row=0, column=0, sticky="w", padx=15, pady=6)
-
-        self.lbl_light = ttk.Label(telemetry_frame, text="Ambient Light: --")
-        self.lbl_light.grid(row=0, column=1, sticky="w", padx=15, pady=6)
-
-        self.lbl_sound = ttk.Label(telemetry_frame, text="Sound Threshold: --", font=("Helvetica", 10, "bold"))
-        self.lbl_sound.grid(row=1, column=0, sticky="w", padx=15, pady=6)
-
-        self.lbl_temp = ttk.Label(telemetry_frame, text="Current Temp: --°C")
-        self.lbl_temp.grid(row=1, column=1, sticky="w", padx=15, pady=6)
-
-        self.lbl_humidity = ttk.Label(telemetry_frame, text="Humidity Level: --%")
-        self.lbl_humidity.grid(row=2, column=0, sticky="w", padx=15, pady=6)
-
-        # self.lbl_motor = ttk.Label(telemetry_frame, text="Stepper Motor: [ STOPPED ]", foreground="#c0392b", font=("Helvetica", 10, "bold"))
-        # self.lbl_motor.grid(row=2, column=1, sticky="w", padx=15, pady=6)
-
-        self.lbl_weather = ttk.Label(telemetry_frame, text="Outdoor Weather: Fetching...", foreground="#2980b9", font=("Helvetica", 10, "italic"))
-        self.lbl_weather.grid(row=3, column=0, sticky="w", padx=15, pady=8)
-
-        # Added Weather Simulator Button
-        self.btn_sim_weather = ttk.Button(telemetry_frame, text="⚙️ Simulated", command=self._trigger_weather_simulation)
-        self.btn_sim_weather.grid(row=3, column=1, sticky="w", padx=15, pady=4)
-
-        self.lbl_product = ttk.Label(telemetry_frame, text="Product Detected: --")
-        self.lbl_product.grid(row=4, column=0, sticky="w", padx=15, pady=6)
-
-        self.lbl_ultrasonic = ttk.Label(telemetry_frame, text="Ultrasonic (calibrated): --")
-        self.lbl_ultrasonic.grid(row=4, column=1, sticky="w", padx=15, pady=6)
-
-        # Logistic Delivery Destination Clusters
-        self.motor_frame = ttk.LabelFrame(tab_operations, text=" Logistic Dispatch Hub (Awaiting MQTT Confirmation) ", padding=12)
-        self.motor_frame.pack(fill="x", padx=10, pady=6)
-
-        self.btn_left_100 = ttk.Button(self.motor_frame, text="📍 Deliver to Frankfurt", style="Accent.TButton", 
-                                  command=lambda: self._execute_delivery(destination="Frankfurt", mqtt_payload="deliver_left"))
-        self.btn_left_100.pack(side="left", fill="x", expand=True, padx=8, pady=6)
-
-        self.btn_right_100 = ttk.Button(self.motor_frame, text="Deliver to Stuttgart 📍", style="Accent.TButton", 
-                                   command=lambda: self._execute_delivery(destination="Stuttgart", mqtt_payload="deliver_right"))
-        self.btn_right_100.pack(side="right", fill="x", expand=True, padx=8, pady=6)
-
-        # Operator Panel Control Frame
-        control_frame = ttk.LabelFrame(tab_operations, text=" Operator Panel Controls ", padding=12)
-        control_frame.pack(fill="x", padx=10, pady=6)
-
-        # Added Night Mode Button Interface Element
-        self.btn_night = ttk.Button(control_frame, text="🌙 Enable Night Mode", command=self._toggle_night_mode)
-        self.btn_night.pack(fill="x", pady=4)
-
-        ttk.Button(control_frame, text="❌ Exit Control Panel", command=self.root.quit).pack(fill="x", pady=4)
-
-        # TAB 2: LIVE ANALYTICS
-        graph_frame = ttk.LabelFrame(tab_graphs, text=" Real-Time Environmental Metrics ", padding=12)
-        graph_frame.pack(fill="both", expand=True, padx=10, pady=6)
-
-        self.fig = Figure(figsize=(6, 4), dpi=100)
-        self.ax_temp = self.fig.add_subplot(211)
-        self.ax_humid = self.fig.add_subplot(212)
-        self.fig.tight_layout(pad=3.0)
-
-        self.line_temp, = self.ax_temp.plot([], [], color="#d35400", label="Temperature (°C)")
-        self.line_humid, = self.ax_humid.plot([], [], color="#16a085", label="Humidity (%)")
-
-        self.ax_temp.set_title("Live Temperature Log")
-        self.ax_temp.set_ylabel("°C")
-        self.ax_humid.set_title("Live Humidity Log")
-        self.ax_humid.set_ylabel("%")
-
-        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        # TAB 3: INVENTORY MANAGEMENT
-        inv_display_frame = ttk.LabelFrame(tab_inventory, text=" Current Stock Tracking ", padding=12)
-        inv_display_frame.pack(fill="both", expand=True, padx=10, pady=6)
-
-        self.inv_tree = ttk.Treeview(inv_display_frame, columns=("ID", "Name", "Qty", "Min"), show="headings", height=8)
-        self.inv_tree.heading("ID", text="Item ID")
-        self.inv_tree.heading("Name", text="Description")
-        self.inv_tree.heading("Qty", text="Quantity")
-        self.inv_tree.heading("Min", text="Alert Threshold")
-        self.inv_tree.column("ID", width=100, anchor="center")
-        self.inv_tree.column("Qty", width=100, anchor="center")
-        self.inv_tree.column("Min", width=120, anchor="center")
-        self.inv_tree.pack(fill="both", expand=True)
-
-        self._populate_inventory_tree()
-
-        inv_action_frame = ttk.LabelFrame(tab_inventory, text=" Inventory Adjustments ", padding=12)
-        inv_action_frame.pack(fill="x", padx=10, pady=6)
-
-        ttk.Label(inv_action_frame, text="Change Amount:").pack(side="left", padx=8)
-        self.ent_qty_change = ttk.Entry(inv_action_frame, width=8)
-        self.ent_qty_change.insert(0, "10")
-        self.ent_qty_change.pack(side="left", padx=8)
-
-        ttk.Button(inv_action_frame, text="➕ Restock Selected", command=lambda: self._handle_stock_adjust(1)).pack(side="left", padx=6)
-        ttk.Button(inv_action_frame, text="➖ Dispatch Selected", command=lambda: self._handle_stock_adjust(-1)).pack(side="left", padx=6)
-
-        # SHARED CONSOLE LOG OUTPUT
-        log_frame = ttk.LabelFrame(self.root, text=" MQTT Broadcast & Execution Output Log ", padding=12)
-        log_frame.pack(fill="both", expand=True, padx=12, pady=8)
-
-        self.log_box = tk.Text(log_frame, height=5, state="disabled", wrap="word", background="#2c3e50", foreground="#ecf0f1", font=("Courier", 10))
-        self.log_box.pack(fill="both", expand=True, side="left")
-        
-        scrollbar = ttk.Scrollbar(log_frame, command=self.log_box.yview)
-        scrollbar.pack(fill="y", side="right")
-        self.log_box.configure(yscrollcommand=scrollbar.set)
-
-    def _populate_inventory_tree(self):
-        for item in self.inv_tree.get_children():
-            self.inv_tree.delete(item)
-        for item_id, details in self.inventory_mgr.get_all_items().items():
-            self.inv_tree.insert("", tk.END, values=(item_id, details["name"], details["qty"], details["min_threshold"]))
-
-    def _handle_stock_adjust(self, direction: int):
-        selected = self.inv_tree.selection()
-        if not selected:
-            return
-
-        try:
-            delta = int(self.ent_qty_change.get()) * direction
-        except ValueError:
-            return
-
-        item_id = self.inv_tree.item(selected[0])["values"][0]
-        success, info = self.inventory_mgr.update_stock(item_id, delta)
-
-        if success:
-            self._populate_inventory_tree()
-            self._sync_inventory_to_mqtt()
-            self._log_to_gui(f"[INVENTORY] Adjusted {item_id} stock by {delta} (Saved to JSON).")
-            if "LOW_STOCK_WARNING" in info:
-                self._send_email_alert("Inventory Alert: Low Stock", f"Item {item_id} has fallen below threshold limits.")
-
-    def _sync_inventory_to_mqtt(self):
-        payload_summary = {item_id: data["qty"] for item_id, data in self.inventory_mgr.get_all_items().items()}
-        self._publish_mqtt("inventory", str(payload_summary))
+    def _sync_inventory_to_mqtt(self) -> None:
+        self._publish_mqtt("inventory", json.dumps({item: data["qty"] for item, data in self.inventory_mgr.get_all_items().items()}))
 
     def _log_to_gui(self, message: str) -> None:
-        # Also write all GUI logs to the file and stdout logger
         logger.info(message)
 
-        # Check if the scrollbar is currently at the very bottom (1.0 or very close to it)
-        at_bottom = self.log_box.yview()[1] >= 0.99
-
-        self.log_box.configure(state="normal")
-        self.log_box.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {message}\n")
-        
-        # Only auto-scroll down if the user was already at the bottom
-        if at_bottom:
-            self.log_box.see(tk.END) 
-            
-        self.log_box.configure(state="disabled")
-
-    def actions_mqtt_publish(self,payload):
-        self._publish_mqtt("actions", payload)
-        self._log_to_gui(f"[MQTT PUB] actions -> {payload}")
-
-    def run_planner(self, domain_dir, problem_dir):
-        """
-        Executes the Fast Downward planner using Unified Planning.
-        """
-        if not os.path.exists(domain_dir):
-            self._log_to_gui(f"[PLANNER] Domain file not found: {domain_dir}")
+        if not hasattr(self, "log_box"):
             return
-
-        if not os.path.exists(problem_dir):
-            self._log_to_gui(f"[PLANNER] Problem file not found: {problem_dir}")
-            return
-
-        if PDDLReader is None or OneshotPlanner is None:
-            self._log_to_gui("[PLANNER] unified_planning is not available. Install it to run the planner.")
-            return
-
-        self._log_to_gui(f"[PLANNER] Using Unified Planning with Fast Downward for {problem_dir}")
 
         try:
-            reader = PDDLReader()
-            problem = reader.parse_problem(domain_dir, problem_dir)
+            if not self.log_box.winfo_exists():
+                return
 
-            with OneshotPlanner(name="fast-downward") as planner:
-                result = planner.solve(problem)
+            self.log_box.configure(state="normal")
+            self.log_box.insert(
+                tk.END,
+                f"{time.strftime('%H:%M:%S')}  {message}\n",
+            )
+            self.log_box.see(tk.END)
+            self.log_box.configure(state="disabled")
 
-            output_plan = os.path.join(os.path.dirname(problem_dir), f"plan_{os.path.basename(problem_dir)}.txt")
+        except tk.TclError as exc:
+            logger.error("Unable to write to GUI log: %s", exc)
 
-            status_name = getattr(getattr(result, "status", None), "name", None)
-            if status_name in {"SOLVED_SATISFICING", "SOLVED_OPTIMALLY"}:
-                plan_actions = [str(action) for action in getattr(getattr(result, "plan", None), "actions", [])]
-                plan_text = "\n".join(plan_actions) if plan_actions else "No actions generated."
-                with open(output_plan, "w", encoding="utf-8") as f:
-                    f.write(plan_text)
+    def read_environment_sensors(self) -> Dict[str, Any]:
+        def payload(name): return self.latest_sensors.get(name, {}) if isinstance(self.latest_sensors.get(name, {}), dict) else {}
+        temperature, humidity, motion, light, sound = payload("temperature"), payload("humidity"), payload("motiondetected"), payload("light"), payload("sound")
+        ultrasonic, product = payload("ultrasonic"), payload("productdetected")
+        light_raw, low, high = light.get("raw"), light.get("lightlow_threshold"), light.get("lighthigh_threshold")
+        light_level = "Unknown" if light_raw is None else "Bright" if high is not None and light_raw >= high else "Normal" if low is not None and light_raw >= low else "Low"
+        sound_raw, sound_threshold = sound.get("raw_max"), sound.get("threshold")
+        sound_level = "Unknown" if sound_raw is None else "High" if sound_threshold is not None and sound_raw >= sound_threshold else "Low"
+        raw, threshold = ultrasonic.get("raw"), ultrasonic.get("threshold")
+        present = (raw <= threshold) if raw is not None and threshold is not None else product.get("present")
+        return {"temperature": temperature.get("temperature_c", 0), "humidity": humidity.get("humidity_pct", 0), "motion_detected": bool(motion.get("value", False)), "light_level": light_level, "sound_level": sound_level, "product_present": present}
 
-                for action in plan_actions:
-                    self._log_to_gui(f"[PLANNER] {action}")
-                self.actions_mqtt_publish(plan_text)
-                self._log_to_gui(f"[PLANNER] Finished planning for {problem_dir}. Plan saved to {output_plan}")
-            else:
-                with open(output_plan, "w", encoding="utf-8") as f:
-                    f.write("No plan found.")
-                self._log_to_gui(f"[PLANNER] No plan found for {problem_dir}.")
-        except Exception as e:
-            self._log_to_gui(f"[PLANNER] Error during planning execution: {e}")
+    def _invoke_planner_from_telemetry(self) -> None:
+        required = (
+            "temperature",
+            "humidity",
+            "light",
+            "weather_outdoor"
+        )
 
-    def _run_initial_problem_if_available(self) -> None:
-        pddl_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pddl"))
-        domain_path = os.path.join(pddl_dir, "domain.pddl")
-        initial_problem_path = os.path.join(pddl_dir, "problem_1.pddl")
+        missing = []
 
-        if self._initial_problem_run:
+        for name in required:
+            sensor_data = self.latest_sensors.get(name)
+            
+            # Check if the data is missing or is not a dictionary
+            if not isinstance(sensor_data, dict):
+                missing.append(name)
+
+
+        if missing:
+            self._log_to_gui(
+                "[PLANNER] Waiting for telemetry: " + ", ".join(missing)
+            )
             return
 
-        if os.path.exists(domain_path) and os.path.exists(initial_problem_path):
-            self._log_to_gui("[PLANNER] First startup detected; running existing problem_1.pddl.")
-            self.run_planner(domain_path, initial_problem_path)
-            self._initial_problem_run = True
-
-
-    def generate_pddl_problem(
-        self,
-        init_conditions: List[str],
-        goal_conditions: List[str],
-        zone,  # Now handled as a set/iterable of zones
-        item_name) -> str:
-        
-        pddl_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pddl"))
-        os.makedirs(pddl_dir, exist_ok=True)
-
-        domain_path = os.path.join(pddl_dir, "domain.pddl")
-        if not os.path.exists(domain_path):
-            raise FileNotFoundError(f"Domain file not found: {domain_path}")
-
-        with open(domain_path, "r", encoding="utf-8") as f:
-            domain_text = f.read()
-
-        domain_match = re.search(r"\(define\s*\(domain\s+([^\s\)]+)\)", domain_text)
-        domain_name = domain_match.group(1) if domain_match else "smart-zone-control"
-
-        problem_files = [name for name in os.listdir(pddl_dir) if re.fullmatch(r"problem_(\d+)\.pddl", name)]
-        numbers = []
-        for name in problem_files:
-            match = re.fullmatch(r"problem_(\d+)\.pddl", name)
-            if match:
-                numbers.append(int(match.group(1)))
-        next_number = max(numbers) + 1 if numbers else 1
-        problem_filename = f"problem_{next_number}.pddl"
-        problem_path = os.path.join(pddl_dir, problem_filename)
-
-        # 1. Convert set to a sorted list so PDDL output order remains deterministic
-        zones = sorted(list(zone)) if zone else ["zone1"]
-
-
-        item_name = item_name or "item1"
-
-        # 2. Add required zone-in-building facts for all zones to init_conditions
-        for z in reversed(zones):  # Reversed so they prepend in the correct logical order
-            required_zone_fact = f"(zone-in-building {z} building1)"
-            if required_zone_fact not in init_conditions:
-                init_conditions = [required_zone_fact] + init_conditions
-
-        # 3. Format the multiple zone objects for the PDDL block
-        zones_objects_block = "\n    ".join(f"{z} - zone" for z in zones)
-
-        init_block = "\n      ".join(init_conditions)
-        goal_block = "\n      ".join(goal_conditions) if goal_conditions else ""
-
-        problem_text = (
-            ";; Auto-generated problem file\n"
-            f"(define (problem problem_{next_number})\n"
-            f"  (:domain {domain_name})\n\n"
-            "  (:objects\n"
-            "    building1 - building\n"
-            f"    {zones_objects_block}\n"  # Renders each zone on its own line
-            f"    {item_name} - item\n"
-            "  )\n\n"
-            "  (:init\n"
-            f"    {init_block}\n"
-            "  )\n\n"
-            "  (:goal\n"
-            "    (and\n"
-            f"      {goal_block}\n"
-            "    )\n"
-            "  )\n"
-            ")\n"
-        )
-
-        with open(problem_path, "w", encoding="utf-8") as f:
-            f.write(problem_text)
-
-        self._log_to_gui(f"Generated PDDL problem: {problem_filename}")
-        
-        self.run_planner(domain_path, problem_path)
-
-
-    def aiplanner(
-        self,
-        temperature,
-        humidity,
-        light,
-        sound,
-        motion,
-        product,
-        ultrasonic,
-        delivery_request,
-        motors_status=None ):
-
-        # Placeholder for AI planning logic based on sensor inputs
-        pddl_init = []
-        pddl_goals = []
-        zone=set()
-        global init_conditions_prev, goal_conditions_prev
-
-        if delivery_request and isinstance(delivery_request, dict):
-            item_name = f"item_{delivery_request.get('transaction_id', '1')}"
-        else:
-            # Predict the next item ID based on current delivery count
-            next_count = getattr(self, "delivery_count", 0) + 1
-            item_name = f"item_INV-001_{next_count}"
-
-        if light:
-            if motion["value"]:
-                zone.add(motion['zone'])
-                # FIX: Wrap predicate in parentheses ( )
-                pddl_init.append(f"(motion-detected {motion['zone']})")
-                
-
-            
-            zone.add(light['zone'])
-            pddl_goals.append(f"(control-lights {light['zone']})")
-
-            if(light["raw"] >= light["lighthigh_threshold"]):
-                pddl_init.append(f"(light-high {light['zone']})")
-
-            elif(light["raw"] >= light["lightlow_threshold"] and light["raw"] < light["lighthigh_threshold"]):
-                pddl_init.append(f"(light-normal {light['zone']})")
-
-            else:
-                pddl_init.append(f"(light-low {light['zone']})")
-
-        if temperature:
-            zone.add(temperature['zone'])
-            if(temperature["temperature_c"] >= temperature["temphigh_threshold"]):
-                
-                pddl_init.append(f"(indoor-temp-hot {temperature['zone']})")
-            
-            elif(temperature["temperature_c"] < temperature["templow_threshold"] ):
-                
-                pddl_init.append(f"(indoor-temp-cold {temperature['zone']})")
-
-            else:
-
-                pddl_init.append(f"(indoor-temp-ideal {temperature['zone']})")
-            pddl_goals.append(f"(comfortable {temperature['zone']})")
-
-        if humidity:
-            zone.add(humidity['zone'])
-            if(humidity["humidity_pct"] <= humidity["threshold"]):
-                
-                pddl_init.append(f"(humidity-low {humidity['zone']})")
-                        
-            pddl_goals.append(f"(control-humidity {humidity['zone']})")
-
-
-        if delivery_request:
-            zone.add(delivery_request['zone'])
-
-            if ultrasonic:
-                zone.add(ultrasonic['zone'])
-                if ultrasonic["raw"] <= ultrasonic["threshold"]:
-                    # Product detected — planner will see product-available and choose
-                    # open-gate -> guide-left/right -> delivery-request-handled
-                    pddl_init.append(f"(product-available {item_name} {ultrasonic['zone']})")
-                # If NOT detected — we simply omit product-available from :init.
-                # The planner will then autonomously pick notify-unavailable-left/right
-                # because open-gate requires (product-available ...) as a precondition.
-
-            if delivery_request["command"] == "deliver_left":
-                pddl_init.append(f"(delivery-requested-left {item_name} {delivery_request['zone']})")
-            elif delivery_request["command"] == "deliver_right":
-                pddl_init.append(f"(delivery-requested-right {item_name} {delivery_request['zone']})")
-
-            # Single stable goal — the planner decides whether to deliver or notify.
-            # Python never pre-computes the outcome anymore.
-            pddl_goals.append(f"(delivery-request-handled {item_name} {delivery_request['zone']})")
-
-        # Motor status (gate_motor, guide_motor) is tracked via MQTT in
-        # self.latest_sensors["Motors status"] for monitoring/display purposes.
-        # We do NOT translate motor states into PDDL init facts here —
-        # the planner decides what actions to take based on delivery requests and goals.
-
-
-        if init_conditions_prev != pddl_init or goal_conditions_prev != pddl_goals:
-            init_conditions_prev = pddl_init
-            goal_conditions_prev = pddl_goals
-            self._log_to_gui("pddl_init - " + str(pddl_init))
-            self._log_to_gui("pddl_goals - " + str(pddl_goals))
-            self.generate_pddl_problem(pddl_init, pddl_goals, zone, item_name)
-        else:
-            self._log_to_gui("No changes in conditions; skipping PDDL generation.")
-            
-    def read_environment_sensors(self) -> Dict[str, Any]:
-
-        temperature = self.latest_sensors.get("temperature")
-        humidity = self.latest_sensors.get("humidity")
-        motion = self.latest_sensors.get("motiondetected")
-        light = self.latest_sensors.get("light")
-        sound = self.latest_sensors.get("sound")
-        product = self.latest_sensors.get("productdetected")
-        ultrasonic = self.latest_sensors.get("ultrasonic")
-        delivery_request = self.latest_sensors.get("delivery_request")
-        motors_status = self.latest_sensors.get("Motors status")
-
-
         self.aiplanner(
-            temperature=temperature,
-            humidity=humidity,
-            light=light,
-            sound=sound,
-            motion=motion,
-            product=product,
-            ultrasonic=ultrasonic,
-            delivery_request=delivery_request,
-            motors_status=motors_status
+            self.latest_sensors.get("temperature"),
+            self.latest_sensors.get("humidity"),
+            self.latest_sensors.get("light"),
+            self.latest_sensors.get("sound"),
+            self.latest_sensors.get("motiondetected"),
+            self.latest_sensors.get("productdetected"),
+            self.latest_sensors.get("ultrasonic"),
+            self.latest_sensors.get("delivery_request"),
+            self.latest_sensors.get("weather_outdoor"),
+            self.latest_sensors.get("fan_actuator_status"),
+            self.latest_sensors.get("window_actuator_status"),
+            self.latest_sensors.get("heater_actuator_status"),
         )
-
-        current_temp = 0
-        current_humid = 0
-        motion_state = False
-        light_label = "Unknown"
-        sound_label = "Unknown"
-        product_present = None
-        ultrasonic_val = None
-
-
-        if isinstance(temperature, dict):
-            temp_value = temperature.get("temperature_c")
-            if temp_value is not None:
-                current_temp = temp_value
-
-        if isinstance(humidity, dict):
-            hum_value = humidity.get("humidity_pct")
-            if hum_value is not None:
-                current_humid = hum_value
-
-        if isinstance(motion, dict):
-            motion_state = bool(motion.get("value", False))
-
-        if isinstance(light, dict):
-            raw_value = light.get("raw")
-            high_threshold = light.get("lighthigh_threshold")
-            low_threshold = light.get("lightlow_threshold")
-
-            if raw_value is not None:
-                if high_threshold is not None and raw_value >= high_threshold:
-                    light_label = "Bright"
-                elif low_threshold is not None and raw_value >= low_threshold:
-                    light_label = "Normal"
-                else:
-                    light_label = "Low"
-
-        if isinstance(sound, dict):
-            raw_value = sound.get("raw_max")
-            threshold = sound.get("threshold")
-            if raw_value is not None and threshold is not None:
-                sound_label = "High" if raw_value >= threshold else "Low"
-            elif raw_value is not None:
-                sound_label = "High" if raw_value > 0 else "Low"
-
-        if isinstance(ultrasonic, dict):
-            raw_val = ultrasonic.get("raw")
-            thresh_val = ultrasonic.get("threshold")
-            if raw_val is not None and thresh_val is not None:
-                product_present = (raw_val <= thresh_val)
-            elif raw_val is not None:
-                product_present = (raw_val > 0)
-
-        if product_present is None and isinstance(product, dict):
-            product_present = product.get("present")
-            if product_present is not None:
-                product_present = bool(product_present)
-
-        if isinstance(ultrasonic, dict):
-            ultrasonic_val = ultrasonic.get("raw")
-
-        return {
-            "light_level": light_label,
-            "sound_level": sound_label,
-            "temperature": current_temp,
-            "humidity": current_humid,
-            "motion_detected": motion_state,
-            "product_present": product_present,
-            "ultrasonic": ultrasonic_val,
-            "delivery_request": delivery_request,
-        }
-
-    def _update_plots(self, current_time: str, temp: float, humid: float):
-        self.time_history.append(current_time)
-        self.temp_history.append(temp)
-        self.humid_history.append(humid)
-
-        if len(self.time_history) > self.history_limit:
-            self.time_history.pop(0)
-            self.temp_history.pop(0)
-            self.humid_history.pop(0)
-
-        self.ax_temp.cla()
-        self.ax_humid.cla()
-
-        x_indices = list(range(len(self.time_history)))
-
-        self.ax_temp.plot(x_indices, self.temp_history, color="#d35400", marker=".", linewidth=2)
-        self.ax_temp.set_title("Live Temperature Stream (°C)")
-        self.ax_temp.grid(True, linestyle="--", alpha=0.5)
-        self.ax_temp.set_xticks(x_indices)
-        self.ax_temp.set_xticklabels(self.time_history)
-        self.ax_temp.tick_params(axis='x', rotation=35, labelsize=8)
-
-        self.ax_humid.plot(x_indices, self.humid_history, color="#16a085", marker=".", linewidth=2)
-        self.ax_humid.set_title("Live Humidity Stream (%)")
-        self.ax_humid.grid(True, linestyle="--", alpha=0.5)
-        self.ax_humid.set_xticks(x_indices)
-        self.ax_humid.set_xticklabels(self.time_history)
-        self.ax_humid.tick_params(axis='x', rotation=35, labelsize=8)
-
-        self.fig.tight_layout()
-        self.canvas.draw()
 
     def _update_telemetry_labels(self) -> None:
-        """Refreshes the on-screen labels in real-time."""
+        self._invoke_planner_from_telemetry()
         data = self.read_environment_sensors()
+        self.lbl_motion.config(text="ACTIVE" if data["motion_detected"] else "CLEAR", foreground=self.colors["danger"] if data["motion_detected"] else self.colors["success"])
+        self.lbl_light.config(text=data["light_level"], foreground=self.colors["text"])
+        self.lbl_sound.config(text=data["sound_level"], foreground=self.colors["danger"] if data["sound_level"] == "High" else self.colors["text"])
+        self.lbl_temp.config(text=f"{data['temperature']} °C")
+        self.lbl_humidity.config(text=f"{data['humidity']}%")
+        if data["product_present"] is not None: self.lbl_product.config(text="PRESENT" if bool(data["product_present"]) else "ABSENT", foreground=self.colors["success"] if bool(data["product_present"]) else self.colors["muted"])
 
-        motion_str = "[ ACTIVE ]" if data["motion_detected"] else "[ CLEAR ]"
-        self.lbl_motion.config(text=f"Motion Detection: {motion_str}", foreground="#c0392b" if data["motion_detected"] else "#27ae60")
-        self.lbl_sound.config(text=f"Sound Threshold: {data['sound_level']}", foreground="#c0392b" if data["sound_level"] == "High" else "black")
-
-        self.lbl_light.config(text=f"Ambient Light: {data['light_level']}")
-        self.lbl_temp.config(text=f"Current Temp: {data['temperature']}°C")
-        self.lbl_humidity.config(text=f"Humidity Level: {data['humidity']}%")
-
-        if data["product_present"] is not None:
-            is_present = data["product_present"] in [True, "True", "true", "present", "PRESENT"]
-            product_str = "[ PRESENT ]" if is_present else "[ ABSENT ]"
-            self.lbl_product.config(text=f"Product Detected: {product_str}", foreground="#27ae60" if is_present else "#7f8c8d")
-
-        if data["ultrasonic"] is not None:
-            self.lbl_ultrasonic.config(text=f"Ultrasonic (calibrated): {data['ultrasonic']}")
-
-        # # Build clean real-time binary state representation for current_state.json
-        # export_states = {
-        #     "light_state": data["light_level"],
-        #     "sound_state": data["sound_level"],
-        #     "temperature_state": "High" if data["temperature"] > 30.0 else "Low",
-        #     "humidity_state": "High" if data["humidity"] > 50.0 else "Low",
-        #     "motion_detected": bool(data["motion_detected"]),
-        #     "destination": self.active_destination
-        # }
-
-        # try:
-        #     with open("current_state.json", "w") as f:
-        #         json.dump(export_states, f, indent=4)
-        # except Exception as e:
-        #     logger.error(f"Failed to write real-time state parameters: {e}")
+    def _update_plots(self, now: str, temp: float, humidity: float) -> None:
+        self.time_history.append(now); self.temp_history.append(temp); self.humid_history.append(humidity)
+        if len(self.time_history) > self.history_limit: self.time_history.pop(0); self.temp_history.pop(0); self.humid_history.pop(0)
+        x = list(range(len(self.time_history)))
+        for axis in (self.ax_temp, self.ax_humid): axis.clear(); axis.set_facecolor("#FFFFFF"); axis.grid(True, linestyle="--", alpha=0.28); axis.set_xticks(x); axis.set_xticklabels(self.time_history, rotation=35, fontsize=8)
+        self.ax_temp.plot(x, self.temp_history, color="#D35400", marker=".", linewidth=2); self.ax_temp.set_title("Temperature (°C)", loc="left", fontsize=11)
+        self.ax_humid.plot(x, self.humid_history, color="#16865B", marker=".", linewidth=2); self.ax_humid.set_title("Humidity (%)", loc="left", fontsize=11)
+        self.fig.tight_layout(pad=2.4); self.canvas.draw_idle()
 
     def _refresh_telemetry_loop(self) -> None:
         try:
-            data = self.read_environment_sensors()
-            ts = time.strftime('%H:%M:%S')
-
-            self._update_plots(ts, data["temperature"], data["humidity"])
-            self._update_telemetry_labels()
-
-            # Automated email alert if motion is detected when Night Mode is armed
-            if self.night_mode and data["motion_detected"]:
-                self._send_email_alert(
-                    "SECURITY BREACH: Motion Detected during Night Mode!", 
-                    f"Warning: Facility motion sensor was triggered at {ts} while Night Mode was active."
-                )
-
-            if data["sound_level"] == "High":
-                self._send_email_alert("Dangerously High Sound Level", f"Alert! Sound registered as {data['sound_level']}.")
-
-            # if self.motor_is_running:
-            #     self.lbl_motor.config(text="Stepper Motor: [ RUNNING ]", foreground="#27ae60")
-            # else:
-            #     self.lbl_motor.config(text="Stepper Motor: [ STOPPED ]", foreground="#c0392b")
-        except Exception as exc:
-            logger.exception("Telemetry refresh failed: %s", exc)
-
+            data = self.read_environment_sensors(); self._update_plots(time.strftime("%H:%M:%S"), data["temperature"], data["humidity"]); self._update_telemetry_labels()
+        except Exception as exc: logger.exception("Telemetry refresh failed: %s", exc)
         self.root.after(4000, self._refresh_telemetry_loop)
 
+    def _product_present_for_dispatch(self) -> bool:
+        data = self.read_environment_sensors(); return bool(data["product_present"])
+
     def _execute_delivery(self, destination: str, mqtt_payload: str) -> None:
-        if self.is_waiting_for_mqtt:
-            return
+        if self.is_waiting_for_mqtt: return
+        if not self._product_present_for_dispatch():
+            self._log_to_gui(f"[DELIVERY ABORT] No product detected for {destination}.")
+            messagebox.showwarning("No product detected", "Place a package in the dispatch zone before retrying."); return
+        success, info = self.inventory_mgr.update_stock("INV-001", -1)
+        if not success: messagebox.showerror("Dispatch unavailable", "Insufficient stock."); return
+        self.delivery_count += 1; transaction_id = f"INV-001_{self.delivery_count}"
+        self.is_waiting_for_mqtt = True; self.active_destination = destination; self.btn_left_100.config(state="disabled"); self.btn_right_100.config(state="disabled")
+        self.lbl_dispatch_status.config(text=f"Waiting for MQTT confirmation · {destination}", foreground=self.colors["primary"])
+        self._populate_inventory_tree(); self._sync_inventory_to_mqtt()
+        self._pending_deliveries[transaction_id] = destination
+        payload = json.dumps({"command": mqtt_payload, "transaction_id": transaction_id, "destination": destination})
+        self._publish_mqtt("delivery_request", payload); self._log_to_gui(f"[LOGISTICS] Dispatching to {destination} ({transaction_id}).")
+        if not (self.mqtt_client and self.mqtt_connected): self.root.after(2500, lambda: self._on_mqtt_delivery_success_received(transaction_id, self._pending_deliveries.pop(transaction_id, destination)))
 
-        # -------------------------------------------------------
-        # Step 1: Ultrasonic pre-check — confirm product is present
-        # before touching inventory or publishing anything.
-        # This mirrors the PDDL domain's open-gate precondition:
-        #   (product-available ?i ?z)
-        # and the notify-unavailable-left/right actions.
-        # -------------------------------------------------------
-        ultrasonic_data = self.latest_sensors.get("ultrasonic")
-        product_data    = self.latest_sensors.get("productdetected")
+    def _on_mqtt_delivery_success_received(
+        self,
+        transaction_id: str,
+        destination: str,) -> None:
 
-        product_physically_present = False
-        if isinstance(ultrasonic_data, dict):
-            raw       = ultrasonic_data.get("raw")
-            threshold = ultrasonic_data.get("threshold")
-            if raw is not None and threshold is not None:
-                product_physically_present = (raw <= threshold)
-            elif raw is not None:
-                product_physically_present = (raw > 0)
-        elif isinstance(product_data, dict):
-            # Fall back to binary product-detected flag if ultrasonic not yet received
-            product_physically_present = bool(product_data.get("present", False))
+        active_request = self.latest_sensors.get("delivery_request")
 
-        if not product_physically_present:
-            # PDDL equivalent: notify-unavailable-left / notify-unavailable-right
-            no_product_msg = (
-                f"⚠️  No product detected in the dispatch zone!\n\n"
-                f"Destination:  {destination}\n"
-                f"Direction:    {'Left (Frankfurt)' if 'left' in mqtt_payload else 'Right (Stuttgart)'}\n\n"
-                "Please place a package before retrying."
-            )
-            logger.warning("[DELIVERY ABORT] %s — no product detected by ultrasonic sensor.", destination)
-            self._log_to_gui(f"[DELIVERY ABORT] No product detected. Dispatch to {destination} cancelled.")
-            messagebox.showwarning("No Product Detected", no_product_msg)
-            return  # Abort — do NOT deduct stock or publish MQTT
+        if (
+            isinstance(active_request, dict)
+            and active_request.get("transaction_id") == transaction_id
+        ):
+            self.latest_sensors.pop("delivery_request", None)
 
-        # Clear any old/stale actuator feedback when beginning a new request
-        if "Motors status" in self.latest_sensors:
-            del self.latest_sensors["Motors status"]
+        self._log_to_gui(
+            f"[DELIVERY] Confirmed: {transaction_id} delivered to {destination}."
+        )
 
-        # -------------------------------------------------------
-        # Step 2: Product confirmed — deduct inventory
-        # -------------------------------------------------------
-        item_id = "INV-001"
-        
-        success, info = self.inventory_mgr.update_stock(item_id, -1)
-        if not success:
-            err_msg = f"[INVENTORY ABORT] Cannot dispatch to {destination}. Reason: Zero or Insufficient stock balance."
-            self._log_to_gui(err_msg)
-            return
-            
-        # -------------------------------------------------------
-        # Step 3: Lock UI and publish delivery_request over MQTT
-        # -------------------------------------------------------
-        self.is_waiting_for_mqtt = True
-        self.active_destination = destination
-        self.btn_left_100.config(state="disabled")
-        self.btn_right_100.config(state="disabled")
-        self.motor_frame.config(text=" Logistic Dispatch Hub (LOCKOUT: Awaiting Confirmation) ")
+        self._reset_dispatch(f"Delivered successfully to {destination}")
+        self._update_telemetry_labels()
 
-        self._populate_inventory_tree()
-        self._sync_inventory_to_mqtt()
-        self._update_telemetry_labels()  # Instantly refresh destination state out to JSON file
-        
-        if "LOW_STOCK_WARNING" in info:
-            self._send_email_alert("Inventory Alert: Low Stock Warning", f"Item {item_id} has breached threshold parameters.")
-
-        self.delivery_count += 1
-        seq_id = f"{item_id}_{self.delivery_count}"
-
-        msg = f"[LOGISTICS] Dispatching {destination}. Transaction ID: {seq_id} (Awaiting Callback...)"
-        self._log_to_gui(msg)
-
-        delivery_payload = json.dumps({
-            "command": mqtt_payload,          # "deliver_left" or "deliver_right"
-            "transaction_id": seq_id,
-            "destination": destination,
-        })
-        self._publish_mqtt("delivery_request", delivery_payload)
-
-        if not hasattr(self, "_pending_deliveries"):
-            self._pending_deliveries = {}
-        self._pending_deliveries[seq_id] = destination
-
-        if not (self.mqtt_client and self.mqtt_connected):
-            self.root.after(2500, lambda: self._on_mqtt_delivery_success_received(
-                seq_id, self._pending_deliveries.pop(seq_id, destination)))
-
-    def _on_mqtt_delivery_success_received(self, transaction_id: str, destination: str):
-        success_msg = f"[MQTT SUB] Received Success Acknowledgment back for {transaction_id} at {destination}."
-        self._log_to_gui(success_msg)
-
-        if "delivery_request" in self.latest_sensors:
-            del self.latest_sensors["delivery_request"]
-
-        self.is_waiting_for_mqtt = False
-        self.active_destination = "None"
-        self.btn_left_100.config(state="normal")
-        self.btn_right_100.config(state="normal")
-        self.motor_frame.config(text=" Logistic Dispatch Hub (Ready) ")
-        self._update_telemetry_labels()  # Return destination state back to "None"
-
-    def _send_notification(self, zone: str) -> bool:
-        payload = {"zone": zone, "alert": "Dangerously High Sound Level"}
-        msg = f"[NOTIFICATION] Alert dispatched: {payload}"
-        self._log_to_gui(msg)
-        return True
+    def _reset_dispatch(self, status: str = "Ready for a delivery request") -> None:
+        self.is_waiting_for_mqtt = False; self.active_destination = None; self.btn_left_100.config(state="normal"); self.btn_right_100.config(state="normal")
+        self.lbl_dispatch_status.config(text=status, foreground=self.colors["success"] if status.startswith("Delivered") else self.colors["primary"])
 
 
-def on_close_clean(app_interface: SmartWarehouseInterfaceGUI, root_window: tk.Tk):
-    #app_interface.execute_action("stop-motor", ())
-    if getattr(app_interface, "mqtt_client", None):
-        try:
-            app_interface.mqtt_client.loop_stop()
-            app_interface.mqtt_client.disconnect()
-        except Exception:
-            pass
-    root_window.destroy()
+def on_close_clean(app: SmartWarehouseInterfaceGUI, root: tk.Tk) -> None:
+    if app.mqtt_client:
+        try: app.mqtt_client.loop_stop(); app.mqtt_client.disconnect()
+        except Exception: pass
+    root.destroy()
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    warehouse_gui = SmartWarehouseInterfaceGUI(root)
-    root.protocol("WM_DELETE_WINDOW", lambda: on_close_clean(warehouse_gui, root))
-    
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        # warehouse_gui.execute_action("stop-motor", ())
-        if getattr(warehouse_gui, "mqtt_client", None):
-            try:
-                warehouse_gui.mqtt_client.loop_stop()
-                warehouse_gui.mqtt_client.disconnect()
-            except Exception:
-                pass
-        sys.exit(0)
+    app = SmartWarehouseInterfaceGUI(root)
+    root.protocol("WM_DELETE_WINDOW", lambda: on_close_clean(app, root))
+    try: root.mainloop()
+    except KeyboardInterrupt: on_close_clean(app, root); sys.exit(0)

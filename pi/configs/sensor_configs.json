@@ -13,8 +13,8 @@
   },
 
     "temperature_sensor": {
-    "templow_threshold": 27,
-    "temphigh_threshold": 29
+    "templow_threshold": 25,
+    "temphigh_threshold": 27
   },
 
     "humidity_sensor": {

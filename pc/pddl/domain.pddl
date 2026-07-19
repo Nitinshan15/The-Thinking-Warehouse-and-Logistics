@@ -206,8 +206,6 @@
     :parameters (?i - item ?z - zone)
     :precondition (and (or (delivery-requested-left ?i ?z)
                            (delivery-requested-right ?i ?z))
-                        (not (and (delivery-requested-left ?i ?z)
-                                  (delivery-requested-right ?i ?z)))
                         (product-available ?i ?z)
                         (not (gate-open ?z))
                         (not (delivered-left ?i))

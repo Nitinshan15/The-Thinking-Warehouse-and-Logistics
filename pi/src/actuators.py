@@ -24,7 +24,7 @@ import logging
 import time
 import sys
 from plugwise_control import PlugwiseController
-
+import re
 from mqtt_process import MQTTProcessor, load_mqtt_config
 
 import RPi.GPIO as GPIO
@@ -71,7 +71,7 @@ processor = MQTTProcessor(mqtt_cfg)
 DELIVERY_REQUEST_TOPIC = "delivery_request"
 DELIVERY_ACK_TOPIC     = "delivery_ack"
 
-
+FAN_ACT_STATUS_TOPIC = "building1/floor0/zone1/fan_actuator_status"
 # ---------------------------------------------------------------------------
 # Motor control helpers
 # ---------------------------------------------------------------------------
@@ -188,44 +188,52 @@ def _handle_delivery_request(payload_str: str):
 
 def _handle_actions_request(payload_str: str):
 
-
+    
     raw_payload = payload_str
     try:
         actions_list = [line.strip() for line in raw_payload.split("\n") if line.strip()]
     
         print(f"\n[{time.strftime('%X')}] Received Action Batch. Processed List: {actions_list}")
     
-        # 3. Iterate through the actions list and match commands
-        for action in actions_list:
-            
-            # --- FAN CONTROLS ---
-            if "turn-fan-on" in action:
-                print("[*] Target found: Fan -> Command: ON")
-                controller.turn_on(MAC_FAN)
-            
-            elif "turn-fan-off" in action:
-                print("[*] Target found: Fan -> Command: OFF")
-                controller.turn_off(MAC_FAN)
+        clean_actions = [re.sub(r"\([^)]*\)", "", action) for action in actions_list]
 
-            else:
-                print("[*] Target found: Fan -> Command: OFF")
-                controller.turn_off(MAC_FAN)
-                
-            # --- HUMIDIFIER CONTROLS ---
-            if "humidifier-turn-on" in action:
-                print("[*] Target found: Humidifier -> Command: ON")
-                controller.turn_on(MAC_HUMIDIFIER)
+        
+        # --- FAN CONTROLS ---
+        if "turn-fan-on" in clean_actions:
+            print("[*] Target found: Fan -> Command: ON")
+            controller.turn_on(MAC_FAN)
+            mode = "fan-on"
+        
+        elif "turn-fan-off" in clean_actions:
+            print("[*] Target found: Fan -> Command: OFF")
+            controller.turn_off(MAC_FAN)
+            mode = "fan-off"
 
-            else:
-                print("[*] Target found: Humidifier -> Command: OFF")
-                controller.turn_off(MAC_HUMIDIFIER)
-            
-            if "lights-on" in action:
-                print("[*] Target found: Light -> Command: ON")
-                digitalWrite(PIN_LED, GPIO.HIGH)
-            else:
-                print("[*] Target found: Light -> Command: OFF")
-                digitalWrite(PIN_LED, GPIO.LOW)
+
+        else:
+            print("[*] Going to default state : Fan -> Command: OFF")
+            controller.turn_off(MAC_FAN)
+            mode = "fan-off"
+
+        payload_fan_state = {"status": mode}
+        processor.client.publish(FAN_ACT_STATUS_TOPIC, json.dumps(payload_fan_state), qos=1, retain=True)
+
+
+        # --- HUMIDIFIER CONTROLS ---
+        if "humidifier-turn-on" in clean_actions:
+            print("[*] Target found: Humidifier -> Command: ON")
+            controller.turn_on(MAC_HUMIDIFIER)
+
+        else:
+            print("[*] Target found: Humidifier -> Command: OFF")
+            controller.turn_off(MAC_HUMIDIFIER)
+        
+        if "lights-on" in clean_actions:
+            print("[*] Target found: Light -> Command: ON")
+            digitalWrite(PIN_LED, GPIO.HIGH)
+        else:
+            print("[*] Target found: Light -> Command: OFF")
+            digitalWrite(PIN_LED, GPIO.LOW)
 
 
     except Exception as e:

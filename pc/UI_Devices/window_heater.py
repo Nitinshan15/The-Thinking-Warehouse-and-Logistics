@@ -1,12 +1,18 @@
+import json
 import tkinter as tk
 from PIL import Image, ImageTk
 import paho.mqtt.client as mqtt
 import time
+import re
+from sympy import re
 
 # --- CONFIGURATION ---
 MQTT_BROKER = "192.168.0.199" 
 TOPIC_WINDOW = "building1/floor0/zone1/actions"
 TOPIC_HEATER = "building1/floor0/zone1/actions"
+
+TOPIC_WINDOW_ACT = "building1/floor0/zone1/window_actuator_status"
+TOPIC_HEATER_ACT = "building1/floor0/zone1/heater_actuator_status"
 
 class WarehouseUI:
     def __init__(self, root):
@@ -52,25 +58,36 @@ def on_message(client, userdata, msg):
     payload_str = msg.payload.decode()
     raw_payload = payload_str
 
-    try:
-        actions_list = [line.strip() for line in raw_payload.split("\n") if line.strip()]
+    actions_list = [line.strip() for line in raw_payload.split("\n") if line.strip()]
     
-        print(f"\n[{time.strftime('%X')}] Received Action Batch. Processed List: {actions_list}")
-    
-        # 3. Iterate through the actions list and match commands
-        for action in actions_list:
-            
-            # --- FAN CONTROLS ---
-            if "window-open" in action:
-                app.root.after(0, lambda: app.update_window("OPEN"))
-            else:
-                app.root.after(0, lambda: app.update_window("CLOSED"))
+    print(f"\n[{time.strftime('%X')}] Received Action Batch. Processed List: {actions_list}")
 
-            # --- HEATER CONTROLS ---
-            if "heater-on" in action:
-                app.root.after(0, lambda: app.update_heater("ON"))
-            else:
-                app.root.after(0, lambda: app.update_heater("OFF"))
+    try:
+        
+    
+        clean_actions = [action.split("(", 1)[0].strip() for action in actions_list]
+
+    
+        
+        # --- FAN CONTROLS ---
+        if "open-window" in clean_actions:
+            app.root.after(0, lambda: app.update_window("OPEN"))
+            payload_str = {"status": "window-open"}
+            client.publish(TOPIC_WINDOW_ACT, json.dumps(payload_str), qos=1, retain=True)
+        else:
+            app.root.after(0, lambda: app.update_window("CLOSED"))
+            payload_str = {"status": "window-closed"}
+            client.publish(TOPIC_WINDOW_ACT, json.dumps(payload_str), qos=1, retain=True)
+
+        # --- HEATER CONTROLS ---
+        if "heater-on" in clean_actions:
+            app.root.after(0, lambda: app.update_heater("ON"))
+            payload_str = {"status": "heater-on"}
+            client.publish(TOPIC_HEATER_ACT, json.dumps(payload_str), qos=1, retain=True)
+        else:
+            app.root.after(0, lambda: app.update_heater("OFF"))
+            payload_str = {"status": "heater-off"}
+            client.publish(TOPIC_HEATER_ACT, json.dumps(payload_str), qos=1, retain=True)
 
     except Exception as e:
         print(f"[-] Failed to process MQTT command action: {e}")
@@ -82,6 +99,8 @@ client = mqtt.Client()
 client.on_message = on_message
 client.connect(MQTT_BROKER, 1883, 60)
 client.subscribe([(TOPIC_WINDOW, 0), (TOPIC_HEATER, 0)])
+client.publish(TOPIC_WINDOW_ACT, "window-closed", qos=1, retain=True)
+client.publish(TOPIC_HEATER_ACT, "heater-off", qos=1, retain=True)
 client.loop_start()
 
 root.mainloop()
