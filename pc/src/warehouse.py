@@ -32,12 +32,15 @@ from email.message import EmailMessage
 
 NIGHT_SOUND_EMAIL_INTERVAL_SECONDS = 30
 
+MY_EMAIL="abc@gmail.com"
+MY_PASSWORD="password"
+
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "nitinshanbackup@gmail.com")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "iuttcgbjgactdmtg")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "nitinshanbackup@gmail.com")
-EMAIL_TO = os.environ.get("EMAIL_TO", "nitinshanbackup@gmail.com")
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "MY_EMAIL")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "MY_PASSWORD")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "MY_EMAIL")
+EMAIL_TO = os.environ.get("EMAIL_TO", "MY_EMAIL")
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
