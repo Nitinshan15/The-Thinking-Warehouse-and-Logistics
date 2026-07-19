@@ -15,6 +15,7 @@ import random
 import os
 
 import grovepi
+import logging
 
 
 
@@ -31,15 +32,26 @@ CONFIG_PATH = os.path.join(BASE_DIR, "configs", "sensor_configs.json")
 
 # Motion detection persistence: keep motion true for 30 seconds after detection
 _motion_last_detected = None
-MOTION_PERSISTENCE_SECONDS = 10
+MOTION_PERSISTENCE_SECONDS = 30
 
 grovepi.pinMode(SOUND_PORT, "INPUT")
 grovepi.pinMode(LIGHT_PORT, "INPUT")
 grovepi.pinMode(MOTION_PORT, "INPUT")
 
-def load_config(path=CONFIG_PATH):
-    with open(path) as f:
-        return json.load(f)
+logger = logging.getLogger(__name__)
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    except json.JSONDecodeError as exc:
+        logger.error(
+            "Invalid sensor configuration; retaining last valid config: %s",
+            exc,
+        )
+        return None
 
 
 # mqtt config is handled by mqtt_process.py; sensor_read only needs sensor_configs

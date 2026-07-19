@@ -56,48 +56,108 @@
     (delivered-right                ?i - item)
     (delivery-request-handled       ?i - item ?z - zone)   ; planner sets this as terminal goal
   )
-
   ;; ============================================================
   ;; 1) AMBIENCE LIGHT
+  ;; Desired policy:
+  ;; - LED ON when motion exists and light is low/normal.
+  ;; - LED OFF when no motion exists or light is high.
   ;; ============================================================
 
-  
-
-
-;; Rule: If motion + low light + we WANT lights on -> Turn them on
+  ;; Physical state transition: LED must be switched ON.
   (:action lights-on
     :parameters (?z - zone)
-    :precondition (and (motion-detected ?z) 
-                       (or (light-low ?z) (light-normal ?z)))
-    :effect (and (led-on ?z) (control-lights ?z))
+    :precondition (and
+      (motion-detected ?z)
+      (or (light-low ?z) (light-normal ?z))
+      (not (led-on ?z))
+    )
+    :effect (led-on ?z)
   )
 
-  ;; Rule: If NO motion OR bright enough + we WANT lights off -> Ensure they are off
+  ;; Physical state transition: LED must be switched OFF.
   (:action lights-off
     :parameters (?z - zone)
-    :precondition (or (not (motion-detected ?z)) (light-high ?z))
-    :effect (and (not (led-on ?z)) (control-lights ?z))
+    :precondition (and
+      (or
+        (not (motion-detected ?z))
+        (light-high ?z)
+      )
+      (led-on ?z)
+    )
+    :effect (not (led-on ?z))
   )
-  
+
+  ;; Planner-only confirmation:
+  ;; motion is present and light is low/normal, and LED is already ON.
+  (:action confirm-lights-on
+    :parameters (?z - zone)
+    :precondition (and
+      (motion-detected ?z)
+      (or (light-low ?z) (light-normal ?z))
+      (led-on ?z)
+    )
+    :effect (control-lights ?z)
+  )
+
+  ;; Planner-only confirmation:
+  ;; no motion or high light, and LED is already OFF.
+  (:action confirm-lights-off
+    :parameters (?z - zone)
+    :precondition (and
+      (or
+        (not (motion-detected ?z))
+        (light-high ?z)
+      )
+      (not (led-on ?z))
+    )
+    :effect (control-lights ?z)
+)
   ;; ============================================================
-  ;; 3) HUMIDITY
-  ;; ============================================================
+;; 3) HUMIDITY
+;; ============================================================
 
-
-;; --- HUMIDITY RULE EVALUATORS ---
-
-  ;; Rule: If humidity is low, we want the humidifier ON
+  ;; Physical action: only applicable when humidity is low
+  ;; and the humidifier is currently OFF.
   (:action humidifier-turn-on
     :parameters (?z - zone)
-    :precondition (humidity-low ?z)
-    :effect (and (humidifier-on ?z) (control-humidity ?z))
+    :precondition (and
+      (humidity-low ?z)
+      (not (humidifier-on ?z))
+    )
+    :effect (humidifier-on ?z)
   )
 
-  ;; Rule: If humidity is NOT low, we want the humidifier OFF
+  ;; Physical action: only applicable when humidity is normal/high
+  ;; and the humidifier is currently ON.
   (:action humidifier-turn-off
     :parameters (?z - zone)
-    :precondition (not (humidity-low ?z))
-    :effect (and (not (humidifier-on ?z)) (control-humidity ?z))
+    :precondition (and
+      (not (humidity-low ?z))
+      (humidifier-on ?z)
+    )
+    :effect (not (humidifier-on ?z))
+  )
+
+  ;; Planner-only verification:
+  ;; humidity is low and the humidifier is ON.
+  (:action confirm-humid-low
+    :parameters (?z - zone)
+    :precondition (and
+      (humidity-low ?z)
+      (humidifier-on ?z)
+    )
+    :effect (control-humidity ?z)
+  )
+
+  ;; Planner-only verification:
+  ;; humidity is not low and the humidifier is OFF.
+  (:action confirm-humid-normal
+    :parameters (?z - zone)
+    :precondition (and
+      (not (humidity-low ?z))
+      (not (humidifier-on ?z))
+    )
+    :effect (control-humidity ?z)
   )
 
 ;; --- ACTUATOR ACTIONS ---

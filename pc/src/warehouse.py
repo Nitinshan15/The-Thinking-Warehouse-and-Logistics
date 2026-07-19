@@ -19,20 +19,26 @@ from pathlib import Path
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-try:
-    import paho.mqtt.client as mqtt
-except ImportError:
-    mqtt = None
+import paho.mqtt.client as mqtt
 
-try:
-    from unified_planning.io import PDDLReader
-    from unified_planning.shortcuts import OneshotPlanner
-except ImportError:
-    PDDLReader = None
-    OneshotPlanner = None
+
+from unified_planning.io import PDDLReader
+from unified_planning.shortcuts import OneshotPlanner
+
+import smtplib
+import ssl
+import threading
+from email.message import EmailMessage
+
+NIGHT_SOUND_EMAIL_INTERVAL_SECONDS = 30
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "nitinshanbackup@gmail.com")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "iuttcgbjgactdmtg")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "nitinshanbackup@gmail.com")
+EMAIL_TO = os.environ.get("EMAIL_TO", "nitinshanbackup@gmail.com")
+
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -54,7 +60,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("WarehouseHardwareInterface")
 
-init_conditions_prev: list[str] = []
+sensor_conditions_prev: list[str] = []
 goal_conditions_prev: list[str] = []
 
 
@@ -109,6 +115,8 @@ class SmartWarehouseInterfaceGUI:
 
         self.style = ttk.Style()
         self.night_mode = False
+        self._last_night_sound_email_time = 0.0
+        self._night_sound_alert_active = False
         self.weather_simulated = False
         self.inventory_mgr = InventoryManager()
         self.history_limit = 20
@@ -279,6 +287,44 @@ class SmartWarehouseInterfaceGUI:
         log_scroll = ttk.Scrollbar(self.log_frame, command=self.log_box.yview); log_scroll.pack(side="right", fill="y"); self.log_box.configure(yscrollcommand=log_scroll.set)
 
 
+    def _send_email_async(self, subject: str, body: str) -> None:
+        threading.Thread(
+            target=self._send_email,
+            args=(subject, body),
+            daemon=True,
+        ).start()
+
+
+    def _send_email(self, subject: str, body: str) -> None:
+        if not all((SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO)):
+            self._log_to_gui(
+                "[EMAIL] Not sent: configure SMTP_USERNAME, SMTP_PASSWORD, "
+                "EMAIL_FROM, and EMAIL_TO."
+            )
+            return
+
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = EMAIL_FROM
+        message["To"] = EMAIL_TO
+        message.set_content(body)
+
+        try:
+            context = ssl.create_default_context()
+
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(message)
+
+            self._log_to_gui(f"[EMAIL] Sent: {subject}")
+
+        except Exception as exc:
+            logger.exception("Email notification failed")
+            self._log_to_gui(f"[EMAIL] Failed: {exc}")
+
     # -------------------- PDDL planner integration --------------------
     def actions_mqtt_publish(self, payload: str) -> None:
         self._publish_mqtt("actions", payload)
@@ -324,12 +370,59 @@ class SmartWarehouseInterfaceGUI:
     def _run_initial_problem_if_available(self) -> None:
         pddl_dir = self._pddl_dir()
         domain_path = os.path.join(pddl_dir, "domain.pddl")
-        problem_path = os.path.join(pddl_dir, "problem_1.pddl")
-        if os.path.exists(domain_path) and os.path.exists(problem_path):
-            self._log_to_gui("[PLANNER] Startup problem detected; running problem_1.pddl.")
-            self.run_planner(domain_path, problem_path)
-        else:
-            self._log_to_gui("[PLANNER] Startup domain/problem not found; waiting for live telemetry.")
+
+        if not os.path.exists(domain_path):
+            self._log_to_gui(
+                "[PLANNER] Startup domain not found; "
+                "waiting for live telemetry."
+            )
+            return
+
+        try:
+            problem_files = []
+
+            for filename in os.listdir(pddl_dir):
+                match = re.fullmatch(r"problem_(\d+)\.pddl", filename)
+
+                if match:
+                    problem_number = int(match.group(1))
+                    problem_path = os.path.join(pddl_dir, filename)
+                    problem_files.append((problem_number, problem_path))
+
+            if not problem_files:
+                self._log_to_gui(
+                    "[PLANNER] No problem_N.pddl files found; "
+                    "waiting for live telemetry."
+                )
+                return
+
+            latest_number, latest_problem_path = max(
+                problem_files,
+                key=lambda item: item[0],
+            )
+
+            latest_filename = os.path.basename(latest_problem_path)
+
+            self._log_to_gui(
+                f"[PLANNER] Startup problem detected; "
+                f"running latest file: {latest_filename}."
+            )
+
+            self.run_planner(domain_path, latest_problem_path)
+
+        except OSError as exc:
+            self._log_to_gui(
+                f"[PLANNER] Cannot scan PDDL directory: {exc}"
+            )
+    # def _run_initial_problem_if_available(self) -> None:
+    #     pddl_dir = self._pddl_dir()
+    #     domain_path = os.path.join(pddl_dir, "domain.pddl")
+    #     problem_path = os.path.join(pddl_dir, "problem_1.pddl")
+    #     if os.path.exists(domain_path) and os.path.exists(problem_path):
+    #         self._log_to_gui("[PLANNER] Startup problem detected; running problem_1.pddl.")
+    #         self.run_planner(domain_path, problem_path)
+    #     else:
+    #         self._log_to_gui("[PLANNER] Startup domain/problem not found; waiting for live telemetry.")
 
     def generate_pddl_problem(self, init_conditions: List[str], goal_conditions: List[str], zones, item_name: str) -> str | None:
         pddl_dir = self._pddl_dir()
@@ -382,9 +475,10 @@ class SmartWarehouseInterfaceGUI:
         self.run_planner(domain_path, problem_path)
         return problem_path
 
-    def aiplanner(self, temperature, humidity, light, sound, motion, product, ultrasonic, delivery_request, weather_outdoor,fanstatus,windowstatus,heaterstatus) -> None:
-        global init_conditions_prev, goal_conditions_prev
+    def aiplanner(self, temperature, humidity, light, sound, motion, product, ultrasonic, delivery_request, weather_outdoor,fanstatus,windowstatus,heaterstatus,lightstatus,humidifierstatus) -> None:
+        global sensor_conditions_prev, goal_conditions_prev
         init_conditions: List[str] = []
+        sensor_conditions: List[str] = []
         goal_conditions: List[str] = []
         zones = set()
         item_name = f"item_INV-001_{self.delivery_count + 1}"
@@ -464,7 +558,7 @@ class SmartWarehouseInterfaceGUI:
                     init_conditions.append("(outdoor-temp-hot)")
                 else:
                     init_conditions.append("(outdoor-temp-cold)")
-            
+
             if weather_outdoor.get("description") == "Raining": 
                 init_conditions.append("(outdoor-raining)")
 
@@ -474,8 +568,10 @@ class SmartWarehouseInterfaceGUI:
         if isinstance(delivery_request, dict):
             zone = get_zone(delivery_request); zones.add(zone)
             command = delivery_request.get("command")
-            if command == "deliver_left": init_conditions.append(f"(delivery-requested-left {item_name} {zone})")
-            elif command == "deliver_right": init_conditions.append(f"(delivery-requested-right {item_name} {zone})")
+            if command == "deliver_left": 
+                init_conditions.append(f"(delivery-requested-left {item_name} {zone})")
+            elif command == "deliver_right": 
+                init_conditions.append(f"(delivery-requested-right {item_name} {zone})")
             else: logger.warning("Invalid delivery request command: %s", command); return
             present = False
             if isinstance(ultrasonic, dict):
@@ -490,42 +586,80 @@ class SmartWarehouseInterfaceGUI:
                     logger.warning("Ultrasonic data is not a dict or missing 'raw': %s", ultrasonic)
 
             elif isinstance(product, dict): present = bool(product.get("present"))
-            if present: init_conditions.append(f"(product-available {item_name} {zone})")
+            if present: 
+                init_conditions.append(f"(product-available {item_name} {zone})")
             goal_conditions.append(f"(delivery-request-handled {item_name} {zone})")
 
-
+        sensor_conditions=init_conditions.copy()
+        #logger.info("Fan status: %r", fanstatus)
         if isinstance(fanstatus, dict):
             zone = get_zone(fanstatus)
             zones.add(zone)
-            if fanstatus.get("status") == "on": init_conditions.append(f"(fan-on {zone})")
-            else: init_conditions.append(f"(fan-off {zone})")
 
+            fan_state = str(fanstatus.get("status", "")).strip().lower()
+
+            if fan_state in ("on", "fan-on"):
+                init_conditions.append(f"(fan-on {zone})")
+            else:
+                init_conditions.append(f"(fan-off {zone})")
         else:
             init_conditions.append(f"(fan-off zone1)")
-            #logger.warning("Fan status data is not a dict: %s", fanstatus)
+            logger.warning("Fan actuator status not received yet.")
 
+
+        #logger.info("Window status: %r", windowstatus)
         if isinstance(windowstatus, dict):
-            zone = get_zone(windowstatus); zones.add(zone)
-            if windowstatus.get("status") == "open": init_conditions.append(f"(window-open {zone})")
-            else: init_conditions.append(f"(window-closed {zone})")
+            zone = get_zone(windowstatus)
+            zones.add(zone)
+
+            window_state = str(windowstatus.get("status", "")).strip().lower()
+
+            if window_state in ("open", "window-open"):
+                init_conditions.append(f"(window-open {zone})")
+            else:
+                init_conditions.append(f"(window-closed {zone})")
         else:
             init_conditions.append(f"(window-closed zone1)")
-            logger.warning("Window status data is not a dict: %s", windowstatus)   
+            logger.warning("Window actuator status not received yet.")
 
+
+        #logger.info("Heater status: %r", heaterstatus)
         if isinstance(heaterstatus, dict):
-            zone = get_zone(heaterstatus); zones.add(zone)
-            if heaterstatus.get("status") == "on":
+            zone = get_zone(heaterstatus)
+            zones.add(zone)
+
+            heater_state = str(heaterstatus.get("status", "")).strip().lower()
+
+            if heater_state in ("on", "heater-on"):
                 init_conditions.append(f"(heater-on {zone})")
-            else: 
+            else:
                 init_conditions.append(f"(heater-off {zone})")
         else:
             init_conditions.append(f"(heater-off zone1)")
-            logger.warning("Heater status data is not a dict: %s", heaterstatus)
+            logger.warning("Heater actuator status not received yet.")
 
+
+        if isinstance(lightstatus, dict):
+            zone = get_zone(lightstatus)
+            zones.add(zone)
+
+            light_state = str(lightstatus.get("status", "")).strip().lower()
+
+            if light_state in ("on", "lights-on"):
+                init_conditions.append(f"(led-on {zone})")
+
+        if isinstance(humidifierstatus, dict):
+            zone = get_zone(humidifierstatus)
+            zones.add(zone)
+
+            humidifier_state = str(humidifierstatus.get("status", "")).strip().lower()
+
+            if humidifier_state in ("on", "humidifier-on"):
+                init_conditions.append(f"(humidifier-on {zone})")
 
         init_conditions = list(dict.fromkeys(init_conditions)); goal_conditions = list(dict.fromkeys(goal_conditions))
-        if (init_conditions, goal_conditions) != (init_conditions_prev, goal_conditions_prev):
-            init_conditions_prev, goal_conditions_prev = init_conditions, goal_conditions
+        if (sensor_conditions, goal_conditions) != (sensor_conditions_prev, goal_conditions_prev):
+            sensor_conditions_prev, goal_conditions_prev = sensor_conditions, goal_conditions
             self._log_to_gui(f"[PLANNER] Init: {init_conditions}")
             self._log_to_gui(f"[PLANNER] Goals: {goal_conditions}")
             self.generate_pddl_problem(init_conditions, goal_conditions, zones, item_name)
@@ -590,6 +724,10 @@ class SmartWarehouseInterfaceGUI:
         sub_topic = topic.split("/")[-1]
         if isinstance(data, dict): data["zone"] = topic.split("/")[-2] if len(topic.split("/")) >= 2 else "zone1"
         self.latest_sensors[sub_topic] = data
+        if sub_topic.endswith("_actuator_status"):
+            self._log_to_gui(
+                f"[ACTUATOR STATE] {sub_topic} = {data.get('status')}"
+            )
         #self._log_to_gui(f"[MQTT SUB] {topic} → {payload}")
         self._update_telemetry_labels()
 
@@ -630,7 +768,18 @@ class SmartWarehouseInterfaceGUI:
             except ValueError: humidity = None
             weather = {"temperature_c": temp, "humidity_pct": humidity, "description": "Raining" if self.var_rain_sim.get() else "Clear"}
             source = "simulated"
-        else: weather = self._get_live_weather_data(); source = "live"
+        else: 
+            weather_temp = self._get_live_weather_data()
+            if weather_temp.get("temperature_c") is None:
+                try: temp = float(self.ent_temp_sim.get())
+                except ValueError: temp = None
+                try: humidity = int(self.ent_humidity_sim.get())
+                except ValueError: humidity = None
+                weather = {"temperature_c": temp, "humidity_pct": humidity, "description": "Raining" if self.var_rain_sim.get() else "Clear"}
+                source = "simulated"
+            else:
+                weather = weather_temp
+                source = "live"
 
         self.latest_sensors["weather_outdoor"] = weather
         display_temp = "—" if weather["temperature_c"] is None else f"{weather['temperature_c']} °C"
@@ -641,10 +790,73 @@ class SmartWarehouseInterfaceGUI:
         self.root.after(30000, self._fetch_weather_service)
 
 
+    def _check_night_sound_alert(self) -> None:
+        sound = self.latest_sensors.get("sound", {})
+
+        if not isinstance(sound, dict):
+            return
+
+        raw_max = sound.get("raw_max")
+        threshold = sound.get("threshold")
+
+        if raw_max is None or threshold is None:
+            return
+
+        is_too_loud = raw_max >= threshold
+
+        if not is_too_loud:
+            return
+
+        if not self.night_mode:
+            return
+
+        now = time.monotonic()
+
+        if (
+            now - self._last_night_sound_email_time
+            < NIGHT_SOUND_EMAIL_INTERVAL_SECONDS
+        ):
+            return
+
+        self._last_night_sound_email_time = now
+
+        zone = sound.get("zone", "zone1")
+
+        self._log_to_gui(
+            f"[SECURITY] High sound detected in {zone} during night mode: "
+            f"{raw_max} (threshold: {threshold})."
+        )
+
+        self._send_email_async(
+            subject=f"Warehouse night alert: high sound in {zone}",
+            body=(
+                "High sound was detected while night mode is enabled.\n\n"
+                f"Zone: {zone}\n"
+                f"Measured sound level: {raw_max}\n"
+                f"Configured threshold: {threshold}\n"
+                f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                "Please check the warehouse area."
+            ),
+        )
+
     def _toggle_night_mode(self) -> None:
         self.night_mode = not self.night_mode
-        self.btn_night.config(text="Disable night mode" if self.night_mode else "Enable night mode")
-        self._log_to_gui("[SYSTEM] Night mode enabled." if self.night_mode else "[SYSTEM] Night mode disabled.")
+
+        if not self.night_mode:
+            self._night_sound_alert_active = False
+
+        self.btn_night.config(
+            text="Disable night mode" if self.night_mode else "Enable night mode"
+        )
+
+        self._log_to_gui(
+            "[SYSTEM] Night mode enabled."
+            if self.night_mode
+            else "[SYSTEM] Night mode disabled."
+        )
+
+        if self.night_mode:
+            self._check_night_sound_alert()
 
     def _populate_inventory_tree(self) -> None:
         for item in self.inv_tree.get_children(): self.inv_tree.delete(item)
@@ -652,14 +864,63 @@ class SmartWarehouseInterfaceGUI:
 
     def _handle_stock_adjust(self, direction: int) -> None:
         selection = self.inv_tree.selection()
-        if not selection: messagebox.showinfo("Select an item", "Select an inventory item first."); return
-        try: delta = int(self.ent_qty_change.get()) * direction
-        except ValueError: messagebox.showerror("Invalid quantity", "Enter a whole-number quantity."); return
-        item_id = self.inv_tree.item(selection[0])["values"][0]; success, info = self.inventory_mgr.update_stock(item_id, delta)
-        if not success: messagebox.showwarning("Inventory update", info); return
-        self._populate_inventory_tree(); self._sync_inventory_to_mqtt(); self._log_to_gui(f"[INVENTORY] {item_id}: {delta:+d} units.")
-        if info == "LOW_STOCK_WARNING": self._log_to_gui(f"[INVENTORY] Low stock warning for {item_id}.")
 
+        if not selection:
+            messagebox.showinfo(
+                "Select an item",
+                "Select an inventory item first.",
+            )
+            return
+
+        try:
+            delta = int(self.ent_qty_change.get()) * direction
+        except ValueError:
+            messagebox.showerror(
+                "Invalid quantity",
+                "Enter a whole-number quantity.",
+            )
+            return
+
+        item_id = self.inv_tree.item(selection[0])["values"][0]
+
+        success, info = self.inventory_mgr.update_stock(item_id, delta)
+
+        if not success:
+            messagebox.showwarning("Inventory update", info)
+            return
+
+        self._populate_inventory_tree()
+        self._sync_inventory_to_mqtt()
+
+        action = "increased" if delta > 0 else "decreased"
+
+        self._log_to_gui(
+            f"[INVENTORY] {item_id}: quantity {action} by {abs(delta)} unit(s)."
+        )
+
+        # Exactly one email for this stock adjustment, but only if low stock.
+        if info == "LOW_STOCK_WARNING":
+            item = self.inventory_mgr.get_all_items()[item_id]
+            quantity = item["qty"]
+            minimum = item["min_threshold"]
+
+            self._log_to_gui(
+                f"[INVENTORY] Low-stock email notification sent for {item_id}."
+            )
+
+            self._send_email_async(
+                subject=f"Warehouse low-stock alert: {item_id}",
+                body=(
+                    "Inventory is at or below the configured minimum level.\n\n"
+                    f"Item ID: {item_id}\n"
+                    f"Item name: {item['name']}\n"
+                    f"Inventory change: {delta:+d} unit(s)\n"
+                    f"Current quantity: {quantity}\n"
+                    f"Minimum threshold: {minimum}\n"
+                    f"Status: LOW STOCK\n"
+                    f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                ),
+            )
     def _sync_inventory_to_mqtt(self) -> None:
         self._publish_mqtt("inventory", json.dumps({item: data["qty"] for item, data in self.inventory_mgr.get_all_items().items()}))
 
@@ -733,11 +994,14 @@ class SmartWarehouseInterfaceGUI:
             self.latest_sensors.get("fan_actuator_status"),
             self.latest_sensors.get("window_actuator_status"),
             self.latest_sensors.get("heater_actuator_status"),
+            self.latest_sensors.get("light_actuator_status"),
+            self.latest_sensors.get("humidifier_actuator_status"),
         )
 
     def _update_telemetry_labels(self) -> None:
         self._invoke_planner_from_telemetry()
         data = self.read_environment_sensors()
+        self._check_night_sound_alert()
         self.lbl_motion.config(text="ACTIVE" if data["motion_detected"] else "CLEAR", foreground=self.colors["danger"] if data["motion_detected"] else self.colors["success"])
         self.lbl_light.config(text=data["light_level"], foreground=self.colors["text"])
         self.lbl_sound.config(text=data["sound_level"], foreground=self.colors["danger"] if data["sound_level"] == "High" else self.colors["text"])

@@ -1,53 +1,36 @@
-(define (problem smart-zone-prob-zone1)
+;; Auto-generated from live warehouse telemetry
+(define (problem problem_81)
   (:domain smart-zone-control)
 
-  (:objects 
-    b1 - building
+  (:objects
+    building1 - building
     zone1 - zone
-    item1 - item
+    item_INV-001_1 - item
   )
 
   (:init
-    ;; --- INFRASTRUCTURE ---
-    (zone-in-building zone1 b1)
+    (zone-in-building zone1 building1)
 
-    ;; --- GLOBAL WEATHER ---
-    (outdoor-hot)
-    (outdoor-raining)
 
-    ;; --- ZONE 1 STATE ---
-    
-    ;; HVAC: It is cold inside, but hot and raining outside
-    (indoor-cold zone1)
-    (window-closed zone1)
-    (fan-off zone1)
-    (heater-off zone1)
-    
-    ;; Lighting: Someone is there, and it's dark
-    (motion-detected zone1)
+  ;;SENSORS state
     (light-low zone1)
-    
-    ;; Humidity: The air is dry
+    (indoor-temp-ideal zone1)
     (humidity-low zone1)
-    
-    ;; Delivery: Someone requested item1 to the right side, and they are in the chute
-    (delivery-requested-right item1 zone1)
-    (product-available item1 zone1)
+    (outdoor-temp-cold)
+
+  ;;ACTUATORS state
+    (fan-off zone1)
+    (window-closed zone1)
+    (heater-off zone1)
+    (led-on zone1)
+    (humidifier-on zone1)
   )
 
-  (:goal 
-    (and 
-      ;; 1. HVAC Goal
-      (comfortable zone1)
-      
-      ;; 2. Humidity Goal
-      (control-humidity zone1)
-      
-      ;; 3. Lighting Goal
+  (:goal
+    (and
       (control-lights zone1)
-      
-      ;; 4. Delivery Goal
-      (delivery-request-handled item1 zone1)
+      (comfortable zone1)
+      (control-humidity zone1)
     )
   )
 )

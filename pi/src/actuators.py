@@ -72,6 +72,8 @@ DELIVERY_REQUEST_TOPIC = "delivery_request"
 DELIVERY_ACK_TOPIC     = "delivery_ack"
 
 FAN_ACT_STATUS_TOPIC = "building1/floor0/zone1/fan_actuator_status"
+LIGHT_ACT_STATUS_TOPIC = "building1/floor0/zone1/light_actuator_status"
+HUMIDIFIER_ACT_STATUS_TOPIC = "building1/floor0/zone1/humidifier_actuator_status"
 # ---------------------------------------------------------------------------
 # Motor control helpers
 # ---------------------------------------------------------------------------
@@ -187,57 +189,129 @@ def _handle_delivery_request(payload_str: str):
         logger.error("[DELIVERY ACK] Failed to publish ack: %s", exc)
 
 def _handle_actions_request(payload_str: str):
-
-    
-    raw_payload = payload_str
     try:
-        actions_list = [line.strip() for line in raw_payload.split("\n") if line.strip()]
-    
-        print(f"\n[{time.strftime('%X')}] Received Action Batch. Processed List: {actions_list}")
-    
-        clean_actions = [re.sub(r"\([^)]*\)", "", action) for action in actions_list]
+        actions_list = [
+            line.strip()
+            for line in payload_str.split("\n")
+            if line.strip()
+        ]
 
-        
-        # --- FAN CONTROLS ---
+        print(
+            f"\n[{time.strftime('%X')}] "
+            f"Received Action Batch: {actions_list}"
+        )
+
+        clean_actions = {
+            re.sub(r"\([^)]*\)", "", action).strip()
+            for action in actions_list
+        }
+
+        # ----- FAN -----
+        # Change state only when an explicit fan command is present.
         if "turn-fan-on" in clean_actions:
-            print("[*] Target found: Fan -> Command: ON")
+            print("[*] Fan command: ON")
             controller.turn_on(MAC_FAN)
-            mode = "fan-on"
-        
+
+            processor.client.publish(
+                FAN_ACT_STATUS_TOPIC,
+                json.dumps({
+                    "status": "fan-on",
+                    "zone": processor.zone,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                qos=1,
+                retain=True,
+            )
+
         elif "turn-fan-off" in clean_actions:
-            print("[*] Target found: Fan -> Command: OFF")
+            print("[*] Fan command: OFF")
             controller.turn_off(MAC_FAN)
-            mode = "fan-off"
 
+            processor.client.publish(
+                FAN_ACT_STATUS_TOPIC,
+                json.dumps({
+                    "status": "fan-off",
+                    "zone": processor.zone,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                qos=1,
+                retain=True,
+            )
 
         else:
-            print("[*] Going to default state : Fan -> Command: OFF")
-            controller.turn_off(MAC_FAN)
-            mode = "fan-off"
+            print("[*] Fan: no command received; keeping current state.")
 
-        payload_fan_state = {"status": mode}
-        processor.client.publish(FAN_ACT_STATUS_TOPIC, json.dumps(payload_fan_state), qos=1, retain=True)
-
-
-        # --- HUMIDIFIER CONTROLS ---
+        # ----- HUMIDIFIER -----
+        # Do not turn it off merely because this plan omitted an action.
         if "humidifier-turn-on" in clean_actions:
-            print("[*] Target found: Humidifier -> Command: ON")
+            print("[*] Humidifier command: ON")
             controller.turn_on(MAC_HUMIDIFIER)
+            processor.client.publish(
+                HUMIDIFIER_ACT_STATUS_TOPIC,
+                json.dumps({
+                    "status": "humidifier-on",
+                    "zone": processor.zone,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                qos=1,
+                retain=True,
+            )
 
-        else:
-            print("[*] Target found: Humidifier -> Command: OFF")
+        elif "humidifier-turn-off" in clean_actions:
+            print("[*] Humidifier command: OFF")
             controller.turn_off(MAC_HUMIDIFIER)
-        
-        if "lights-on" in clean_actions:
-            print("[*] Target found: Light -> Command: ON")
-            digitalWrite(PIN_LED, GPIO.HIGH)
+            processor.client.publish(
+                HUMIDIFIER_ACT_STATUS_TOPIC,
+                json.dumps({
+                    "status": "humidifier-off",
+                    "zone": processor.zone,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                qos=1,
+                retain=True,
+            )
+
         else:
-            print("[*] Target found: Light -> Command: OFF")
+            print("[*] Humidifier: no command received; keeping current state.")
+
+        # ----- LIGHT -----
+        # Again, state changes only on an explicit planner action.
+        if "lights-on" in clean_actions:
+            print("[*] Light command: ON")
+            digitalWrite(PIN_LED, GPIO.HIGH)
+            processor.client.publish(
+                LIGHT_ACT_STATUS_TOPIC,
+                json.dumps({
+                    "status": "lights-on",
+                    "zone": processor.zone,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                qos=1,
+                retain=True,
+            )
+
+        elif "lights-off" in clean_actions:
+            print("[*] Light command: OFF")
             digitalWrite(PIN_LED, GPIO.LOW)
+            processor.client.publish(
+                LIGHT_ACT_STATUS_TOPIC,
+                json.dumps({
+                    "status": "lights-off",
+                    "zone": processor.zone,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                qos=1,
+                retain=True,
+            )
 
+        else:
+            print("[*] Light: no command received; keeping current state.")
 
-    except Exception as e:
-        print(f"[-] Failed to process MQTT command action: {e}")
+    except Exception as exc:
+        logger.exception(
+            "Failed to process MQTT command actions: %s",
+            exc,
+        )
 
 # ---------------------------------------------------------------------------
 # MQTT callbacks
