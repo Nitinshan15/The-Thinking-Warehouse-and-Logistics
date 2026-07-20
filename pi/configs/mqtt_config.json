@@ -1,5 +1,5 @@
 {
-  "host": "192.168.0.199",
+  "host": "10.16.170.211",
   "port": 1883,
   "base_topic": "sensors",
   "building": "building1",

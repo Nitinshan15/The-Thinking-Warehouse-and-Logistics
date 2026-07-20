@@ -12,7 +12,7 @@ from rich.table import Table
 # ==========================================
 # CONFIGURATION
 # ==========================================
-MQTT_BROKER = "192.168.0.199"  # Change to localhost or your broker IP
+MQTT_BROKER = "10.16.170.211"  # Change to localhost or your broker IP
 MQTT_PORT = 1883
 MQTT_TOPIC = "#"  # '#' subscribes to ALL topics
 MQTT_USER = None  # Add username if required

@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 import paho.mqtt.client as mqtt
 
-MQTT_BROKER = "192.168.0.199"
+MQTT_BROKER = "10.16.170.211"
 MQTT_PORT = 1883
 
 TOPIC_ACTIONS = "building1/floor0/zone1/actions"
